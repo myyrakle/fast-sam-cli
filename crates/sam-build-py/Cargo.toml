@@ -1,0 +1,17 @@
+[package]
+name = "sam-build-py"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Python bindings for sam-build-core"
+
+[lib]
+name = "_sam_build_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"] }
+sam-build-core = { path = "../sam-build-core" }
+
+[build-dependencies]
+pyo3-build-config = "0.28"

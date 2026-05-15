@@ -17,6 +17,7 @@ from tomlkit.toml_document import TOMLDocument
 
 from samcli.commands._utils.experimental import ExperimentalFlag, is_experimental_enabled
 from samcli.lib.build.exceptions import InvalidBuildGraphException
+from samcli.lib.build.rust_backend import write_hash_updates as rust_write_hash_updates
 from samcli.lib.providers.provider import Function, LayerVersion
 from samcli.lib.samlib.resource_metadata_normalizer import (
     SAM_IS_NORMALIZED,
@@ -274,6 +275,20 @@ class BuildGraph:
             function_build_definition.add_function(function)
             self._function_build_definitions.append(function_build_definition)
 
+    def put_pre_deduped_function_build_definition(
+        self, function_build_definition: "FunctionBuildDefinition", functions: List[Function]
+    ) -> None:
+        """
+        Append a function build definition whose equivalence grouping was already
+        computed by a trusted caller.
+
+        This avoids repeating the quadratic Python-side dedupe scan after the
+        optional Rust backend has already produced unique function groups.
+        """
+        for function in functions:
+            function_build_definition.add_function(function)
+        self._function_build_definitions.append(function_build_definition)
+
     def put_layer_build_definition(self, layer_build_definition: "LayerBuildDefinition", layer: LayerVersion) -> None:
         """
         Puts the newly read layer build definition into existing build graph.
@@ -308,6 +323,16 @@ class BuildGraph:
             )
             layer_build_definition.layer = layer
             self._layer_build_definitions.append(layer_build_definition)
+
+    def put_pre_deduped_layer_build_definition(
+        self, layer_build_definition: "LayerBuildDefinition", layer: LayerVersion
+    ) -> None:
+        """
+        Append a layer build definition whose equivalence grouping was already
+        computed by a trusted caller.
+        """
+        layer_build_definition.layer = layer
+        self._layer_build_definitions.append(layer_build_definition)
 
     def clean_redundant_definitions_and_update(self, persist: bool) -> None:
         """
@@ -375,6 +400,19 @@ class BuildGraph:
         """
         Helper to write source_hash values to build.toml file
         """
+        if rust_write_hash_updates(
+            str(self._filepath),
+            [
+                (uuid, hashing_info.source_hash, hashing_info.manifest_hash)
+                for uuid, hashing_info in function_content.items()
+            ],
+            [
+                (uuid, hashing_info.source_hash, hashing_info.manifest_hash)
+                for uuid, hashing_info in layer_content.items()
+            ],
+        ):
+            return
+
         if not self._filepath.exists():
             open(self._filepath, "a+").close()  # pylint: disable=consider-using-with
 

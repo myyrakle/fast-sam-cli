@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/sam-build-core", "crates/sam-build-py"]
+resolver = "2"

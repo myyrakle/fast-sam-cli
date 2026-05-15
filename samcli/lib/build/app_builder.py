@@ -20,6 +20,16 @@ from aws_lambda_builders.exceptions import LambdaBuilderError
 
 from samcli.commands._utils.experimental import get_enabled_experimental_flags
 from samcli.lib.build.build_graph import BuildGraph, FunctionBuildDefinition, LayerBuildDefinition
+from samcli.lib.build.rust_backend import (
+    dedupe_function_specs,
+    dedupe_layer_specs,
+    is_enabled as is_rust_build_core_enabled,
+    is_shadow_enabled as is_rust_build_core_shadow_enabled,
+    plan_graph_groups,
+    shadow_dedupe_function_specs,
+    shadow_dedupe_layer_specs,
+    shadow_plan_graph_groups,
+)
 from samcli.lib.build.build_strategy import (
     BuildStrategy,
     CachedOrIncrementalBuildStrategyWrapper,
@@ -44,7 +54,11 @@ from samcli.lib.build.workflow_config import (
 )
 from samcli.lib.docker.log_streamer import LogStreamer, LogStreamError
 from samcli.lib.providers.provider import ResourcesToBuildCollector, Stack, get_full_path
-from samcli.lib.samlib.resource_metadata_normalizer import ResourceMetadataNormalizer
+from samcli.lib.samlib.resource_metadata_normalizer import (
+    SAM_IS_NORMALIZED,
+    SAM_RESOURCE_ID_KEY,
+    ResourceMetadataNormalizer,
+)
 from samcli.lib.utils import osutils
 from samcli.lib.utils.colors import Colored, Colors
 from samcli.lib.utils.lambda_builders import patch_runtime
@@ -283,8 +297,56 @@ class ApplicationBuilder:
                     "Could not read environment variables overrides from file {}: {}".format(env_vars_file, str(ex))
                 ) from ex
 
+        function_env_vars = {
+            function.full_path: _make_env_vars(function, file_env_vars, inline_env_vars) for function in functions
+        }
+        layer_env_vars = {layer.full_path: _make_env_vars(layer, file_env_vars, inline_env_vars) for layer in layers}
+
+        compact_graph_inputs = (
+            (
+                self._compact_function_graph_inputs(functions, function_env_vars),
+                self._compact_layer_graph_inputs(layers, layer_env_vars),
+            )
+            if is_rust_build_core_enabled() or is_rust_build_core_shadow_enabled()
+            else None
+        )
+        rust_graph_groups = plan_graph_groups(*compact_graph_inputs) if compact_graph_inputs is not None else None
+        rust_function_groups = rust_graph_groups[0] if rust_graph_groups is not None else None
+
+        if rust_function_groups is None:
+            self._populate_function_build_definitions_python(build_graph, functions, function_env_vars)
+        else:
+            self._populate_function_build_definitions_from_rust_indexes(
+                build_graph, functions, function_env_vars, rust_function_groups
+            )
+
+        self._compare_rust_function_dedupe(build_graph, functions, function_env_vars, compact_graph_inputs)
+
+        layer_dedupe_specs = (
+            self._layer_dedupe_specs(layers, layer_env_vars)
+            if is_rust_build_core_enabled() or is_rust_build_core_shadow_enabled()
+            else None
+        )
+        rust_layer_groups = rust_graph_groups[1] if rust_graph_groups is not None else None
+
+        if rust_layer_groups is None:
+            self._populate_layer_build_definitions_python(build_graph, layers, layer_env_vars)
+        else:
+            self._populate_layer_build_definitions_from_rust_indexes(
+                build_graph, layers, layer_env_vars, rust_layer_groups
+            )
+
+        self._compare_rust_layer_dedupe(build_graph, layers, layer_dedupe_specs, compact_graph_inputs)
+
+        build_graph.clean_redundant_definitions_and_update(not self._is_building_specific_resource)
+        return build_graph
+
+    @staticmethod
+    def _populate_function_build_definitions_python(
+        build_graph: BuildGraph, functions: List, function_env_vars: Dict[str, Dict]
+    ) -> None:
         for function in functions:
-            container_env_vars = _make_env_vars(function, file_env_vars, inline_env_vars)
+            container_env_vars = function_env_vars[function.full_path]
             function_build_details = FunctionBuildDefinition(
                 function.runtime,
                 function.codeuri,
@@ -297,21 +359,207 @@ class ApplicationBuilder:
             )
             build_graph.put_function_build_definition(function_build_details, function)
 
-        for layer in layers:
-            container_env_vars = _make_env_vars(layer, file_env_vars, inline_env_vars)
+    @staticmethod
+    def _populate_function_build_definitions_from_rust_indexes(
+        build_graph: BuildGraph,
+        functions: List,
+        function_env_vars: Dict[str, Dict],
+        rust_function_groups: List[List[int]],
+    ) -> None:
+        for group in rust_function_groups:
+            representative = functions[group[0]]
+            function_build_details = FunctionBuildDefinition(
+                representative.runtime,
+                representative.codeuri,
+                representative.imageuri,
+                representative.packagetype,
+                representative.architecture,
+                representative.metadata,
+                representative.handler,
+                env_vars=function_env_vars[representative.full_path],
+            )
+            build_graph.put_pre_deduped_function_build_definition(
+                function_build_details,
+                [functions[index] for index in group],
+            )
 
+    @staticmethod
+    def _compact_function_graph_inputs(functions: List, function_env_vars: Dict[str, Dict]) -> List[tuple]:
+        return [
+            (
+                function.runtime,
+                function.codeuri,
+                function.imageuri,
+                function.packagetype,
+                function.architecture,
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in (function.metadata or {}).items()
+                        if key not in {SAM_RESOURCE_ID_KEY, SAM_IS_NORMALIZED}
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                (function.metadata or {}).get("BuildMethod"),
+                function.handler,
+                json.dumps(
+                    function_env_vars[function.full_path],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            for function in functions
+        ]
+
+    @staticmethod
+    def _function_dedupe_specs(functions: List, function_env_vars: Dict[str, Dict]) -> List[Dict]:
+        return [
+            {
+                "full_path": function.full_path,
+                "runtime": function.runtime,
+                "codeuri": function.codeuri,
+                "imageuri": function.imageuri,
+                "packagetype": function.packagetype,
+                "architecture": function.architecture,
+                "metadata_repr": json.dumps(
+                    {
+                        key: value
+                        for key, value in (function.metadata or {}).items()
+                        if key not in {SAM_RESOURCE_ID_KEY, SAM_IS_NORMALIZED}
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "build_method": (function.metadata or {}).get("BuildMethod"),
+                "handler": function.handler,
+                "env_vars_repr": json.dumps(
+                    function_env_vars[function.full_path],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+            for function in functions
+        ]
+
+    @staticmethod
+    def _compare_rust_function_dedupe(
+        build_graph: BuildGraph,
+        functions: List,
+        function_env_vars: Dict[str, Dict],
+        compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
+    ) -> None:
+        rust_graph_groups = shadow_plan_graph_groups(*compact_graph_inputs) if compact_graph_inputs is not None else None
+        rust_groups = (
+            [[functions[index].full_path for index in group] for group in rust_graph_groups[0]]
+            if rust_graph_groups is not None
+            else shadow_dedupe_function_specs(ApplicationBuilder._function_dedupe_specs(functions, function_env_vars))
+        )
+        if rust_groups is None:
+            return
+
+        python_groups = [
+            [function.full_path for function in definition.functions]
+            for definition in build_graph.get_function_build_definitions()
+        ]
+        if rust_groups != python_groups:
+            LOG.warning("Rust build-core shadow mismatch for function dedupe: python=%s rust=%s", python_groups, rust_groups)
+
+    @staticmethod
+    def _populate_layer_build_definitions_python(
+        build_graph: BuildGraph, layers: List, layer_env_vars: Dict[str, Dict]
+    ) -> None:
+        for layer in layers:
             layer_build_details = LayerBuildDefinition(
                 layer.full_path,
                 layer.codeuri,
                 layer.build_method,
                 layer.compatible_runtimes,
                 layer.build_architecture,
-                env_vars=container_env_vars,
+                env_vars=layer_env_vars[layer.full_path],
             )
             build_graph.put_layer_build_definition(layer_build_details, layer)
 
-        build_graph.clean_redundant_definitions_and_update(not self._is_building_specific_resource)
-        return build_graph
+    @staticmethod
+    def _populate_layer_build_definitions_from_rust_indexes(
+        build_graph: BuildGraph,
+        layers: List,
+        layer_env_vars: Dict[str, Dict],
+        rust_layer_groups: List[List[int]],
+    ) -> None:
+        for group in rust_layer_groups:
+            representative = layers[group[0]]
+            layer_build_details = LayerBuildDefinition(
+                representative.full_path,
+                representative.codeuri,
+                representative.build_method,
+                representative.compatible_runtimes,
+                representative.build_architecture,
+                env_vars=layer_env_vars[representative.full_path],
+            )
+            build_graph.put_pre_deduped_layer_build_definition(
+                layer_build_details,
+                layers[group[-1]],
+            )
+
+    @staticmethod
+    def _compact_layer_graph_inputs(layers: List, layer_env_vars: Dict[str, Dict]) -> List[tuple]:
+        return [
+            (
+                layer.full_path,
+                layer.codeuri,
+                layer.build_method,
+                json.dumps(layer.compatible_runtimes, sort_keys=True, separators=(",", ":")),
+                layer.build_architecture,
+                json.dumps(layer_env_vars[layer.full_path], sort_keys=True, separators=(",", ":")),
+            )
+            for layer in layers
+        ]
+
+    @staticmethod
+    def _layer_dedupe_specs(layers: List, layer_env_vars: Dict[str, Dict]) -> List[Dict]:
+        return [
+            {
+                "full_path": layer.full_path,
+                "codeuri": layer.codeuri,
+                "build_method": layer.build_method,
+                "compatible_runtimes_repr": json.dumps(
+                    layer.compatible_runtimes,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "architecture": layer.build_architecture,
+                "env_vars_repr": json.dumps(
+                    layer_env_vars[layer.full_path],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            }
+            for layer in layers
+        ]
+
+    @staticmethod
+    def _compare_rust_layer_dedupe(
+        build_graph: BuildGraph,
+        layers: List,
+        layer_dedupe_specs: Optional[List[Dict]],
+        compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
+    ) -> None:
+        if layer_dedupe_specs is None and compact_graph_inputs is None:
+            return
+
+        rust_graph_groups = shadow_plan_graph_groups(*compact_graph_inputs) if compact_graph_inputs is not None else None
+        rust_groups = (
+            [[layers[index].full_path for index in group] for group in rust_graph_groups[1]]
+            if rust_graph_groups is not None
+            else shadow_dedupe_layer_specs(layer_dedupe_specs)
+        )
+        if rust_groups is None:
+            return
+
+        python_groups = [[definition.layer.full_path] for definition in build_graph.get_layer_build_definitions()]
+        if rust_groups != python_groups:
+            LOG.warning("Rust build-core shadow mismatch for layer dedupe: python=%s rust=%s", python_groups, rust_groups)
 
     @staticmethod
     def update_template(

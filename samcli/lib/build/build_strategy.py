@@ -21,6 +21,12 @@ from samcli.lib.build.build_graph import (
 )
 from samcli.lib.build.dependency_hash_generator import DependencyHashGenerator
 from samcli.lib.build.exceptions import MissingBuildMethodException
+from samcli.lib.build.rust_backend import (
+    remove_redundant_folders,
+    sha256_dir_checksum,
+    shadow_batch_plan_modes,
+    shadow_plan_build,
+)
 from samcli.lib.build.utils import warn_on_invalid_architecture
 from samcli.lib.utils import osutils
 from samcli.lib.utils.architecture import X86_64
@@ -47,6 +53,10 @@ def clean_redundant_folders(base_dir: str, uuids: Set[str]) -> None:
     uuids : Set[str]
         Expected folder names. If any folder name in the base_dir is not present in this Set, it will be deleted.
     """
+    rust_removed = remove_redundant_folders(base_dir, sorted(uuids))
+    if rust_removed is not None:
+        return
+
     base_dir_path = pathlib.Path(base_dir)
 
     if not base_dir_path.exists():
@@ -290,7 +300,9 @@ class CachedBuildStrategy(BuildStrategy):
             return self._delegate_build_strategy.build_single_function_definition(build_definition)
 
         code_dir = str(pathlib.Path(self._base_dir, cast(str, build_definition.codeuri)).resolve())
-        source_hash = dir_checksum(code_dir, ignore_list=[".aws-sam"], hash_generator=hashlib.sha256())
+        source_hash = sha256_dir_checksum(code_dir, [".aws-sam"]) or dir_checksum(
+            code_dir, ignore_list=[".aws-sam"], hash_generator=hashlib.sha256()
+        )
         cache_function_dir = pathlib.Path(self._cache_dir, build_definition.uuid)
         function_build_results = {}
 
@@ -348,7 +360,9 @@ class CachedBuildStrategy(BuildStrategy):
         """
 
         code_dir = str(pathlib.Path(self._base_dir, cast(str, layer_definition.codeuri)).resolve())
-        source_hash = dir_checksum(code_dir, ignore_list=[".aws-sam"], hash_generator=hashlib.sha256())
+        source_hash = sha256_dir_checksum(code_dir, [".aws-sam"]) or dir_checksum(
+            code_dir, ignore_list=[".aws-sam"], hash_generator=hashlib.sha256()
+        )
         cache_function_dir = pathlib.Path(self._cache_dir, layer_definition.uuid)
         layer_build_result = {}
 
@@ -499,6 +513,7 @@ class IncrementalBuildStrategy(BuildStrategy):
         manifest_hash = DependencyHashGenerator(
             cast(str, codeuri), self._base_dir, cast(str, runtime), self._manifest_path_override
         ).hash
+        previous_manifest_hash = build_definition.manifest_hash
 
         is_manifest_changed = True
         is_dependencies_dir_missing = True
@@ -521,6 +536,54 @@ class IncrementalBuildStrategy(BuildStrategy):
                 )
 
         build_definition.download_dependencies = is_manifest_changed or is_dependencies_dir_missing
+        self._compare_rust_incremental_plan(
+            build_definition,
+            runtime,
+            manifest_hash,
+            previous_manifest_hash,
+            is_dependencies_dir_missing,
+            build_definition.download_dependencies,
+        )
+
+    def _compare_rust_incremental_plan(
+        self,
+        build_definition: AbstractBuildDefinition,
+        runtime: Optional[str],
+        manifest_hash: Optional[str],
+        previous_manifest_hash: str,
+        is_dependencies_dir_missing: bool,
+        python_download_dependencies: bool,
+    ) -> None:
+        rust_plan = shadow_plan_build(
+            runtime,
+            False,
+            False,
+            build_definition.source_hash,
+            build_definition.source_hash,
+            manifest_hash,
+            previous_manifest_hash,
+            not is_dependencies_dir_missing,
+        )
+        if rust_plan is None:
+            return
+
+        expected = {
+            "mode": "incremental",
+            "download_dependencies": python_download_dependencies,
+            "next_manifest_hash": build_definition.manifest_hash,
+        }
+        observed = {
+            "mode": rust_plan["mode"],
+            "download_dependencies": rust_plan["download_dependencies"],
+            "next_manifest_hash": rust_plan["next_manifest_hash"],
+        }
+        if observed != expected:
+            LOG.warning(
+                "Rust build-core shadow mismatch for incremental plan on %s: python=%s rust=%s",
+                build_definition.get_resource_full_paths(),
+                expected,
+                observed,
+            )
 
     def _clean_redundant_dependencies(self) -> None:
         """
@@ -574,11 +637,16 @@ class CachedOrIncrementalBuildStrategyWrapper(BuildStrategy):
     def build(self) -> Dict[str, str]:
         result = {}
         with self._cached_build_strategy, self._incremental_build_strategy:
+            self._compare_rust_batch_mode_plans()
             result.update(super().build())
         return result
 
     def build_single_function_definition(self, build_definition: FunctionBuildDefinition) -> Dict[str, str]:
-        if self._is_incremental_build_supported(build_definition.runtime):
+        is_incremental_supported = self._is_incremental_build_supported(build_definition.runtime)
+        self._compare_rust_mode_plan(
+            build_definition.runtime, build_definition.get_resource_full_paths(), is_incremental_supported
+        )
+        if is_incremental_supported:
             LOG.debug(
                 "Running incremental build for runtime %s for following resources (%s)",
                 build_definition.runtime,
@@ -594,7 +662,11 @@ class CachedOrIncrementalBuildStrategyWrapper(BuildStrategy):
         return self._cached_build_strategy.build_single_function_definition(build_definition)
 
     def build_single_layer_definition(self, layer_definition: LayerBuildDefinition) -> Dict[str, str]:
-        if self._is_incremental_build_supported(layer_definition.build_method):
+        is_incremental_supported = self._is_incremental_build_supported(layer_definition.build_method)
+        self._compare_rust_mode_plan(
+            layer_definition.build_method, layer_definition.get_resource_full_paths(), is_incremental_supported
+        )
+        if is_incremental_supported:
             LOG.debug(
                 "Running incremental build for runtime %s for following resources (%s)",
                 layer_definition.build_method,
@@ -608,6 +680,67 @@ class CachedOrIncrementalBuildStrategyWrapper(BuildStrategy):
             layer_definition.get_resource_full_paths,
         )
         return self._cached_build_strategy.build_single_layer_definition(layer_definition)
+
+    def _compare_rust_mode_plan(
+        self, runtime: Optional[str], resource_full_paths: str, python_is_incremental_supported: bool
+    ) -> None:
+        rust_plan = shadow_plan_build(runtime, self._use_container, False, "", "", None, "", False)
+        if rust_plan is None:
+            return
+
+        python_mode = "incremental" if python_is_incremental_supported else "cached"
+        if rust_plan["mode"] != python_mode:
+            LOG.warning(
+                "Rust build-core shadow mismatch for build mode on %s: python=%s rust=%s",
+                resource_full_paths,
+                python_mode,
+                rust_plan["mode"],
+            )
+
+    def _compare_rust_batch_mode_plans(self) -> None:
+        inputs = [
+            (
+                definition.get_resource_full_paths(),
+                definition.runtime,
+                self._use_container,
+            )
+            for definition in self._build_graph.get_function_build_definitions()
+        ]
+        inputs.extend(
+            (
+                definition.get_resource_full_paths(),
+                definition.build_method,
+                self._use_container,
+            )
+            for definition in self._build_graph.get_layer_build_definitions()
+        )
+        rust_modes = shadow_batch_plan_modes(inputs)
+        if rust_modes is None:
+            return
+
+        python_modes = {
+            definition.get_resource_full_paths(): (
+                "incremental" if self._is_incremental_build_supported(definition.runtime) else "cached"
+            )
+            for definition in self._build_graph.get_function_build_definitions()
+        }
+        python_modes.update(
+            {
+                definition.get_resource_full_paths(): (
+                    "incremental" if self._is_incremental_build_supported(definition.build_method) else "cached"
+                )
+                for definition in self._build_graph.get_layer_build_definitions()
+            }
+        )
+        for resource_id, rust_mode in rust_modes:
+            python_mode = python_modes.get(resource_id)
+            if python_mode is not None and rust_mode != python_mode:
+                LOG.warning(
+                    "Rust build-core batch shadow mismatch for build mode on %s: python=%s rust=%s",
+                    resource_id,
+                    python_mode,
+                    rust_mode,
+                )
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """

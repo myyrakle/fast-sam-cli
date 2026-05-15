@@ -719,6 +719,29 @@ class TestIncrementalBuildStrategy(TestCase):
             ANY, ANY, ANY, ANY, ANY, ANY, ANY, dependency_dir, download_dependencies, ANY
         )
 
+    @patch("samcli.lib.build.build_strategy.LOG")
+    @patch("samcli.lib.build.build_strategy.shadow_plan_build")
+    def test_shadow_incremental_plan_logs_mismatch(
+        self, shadow_plan_build_mock, log_mock, patched_manifest_hash, patched_os
+    ):
+        patched_os.path.exists.return_value = True
+        patched_manifest_hash.return_value = Mock(hash="new-hash")
+        shadow_plan_build_mock.return_value = {
+            "mode": "incremental",
+            "download_dependencies": False,
+            "next_manifest_hash": "old-hash",
+        }
+        build_definition = Mock(
+            manifest_hash="old-hash",
+            source_hash="source-hash",
+            dependencies_dir="deps",
+            get_resource_full_paths=Mock(return_value="Fn"),
+        )
+
+        self.build_strategy._check_whether_manifest_is_changed(build_definition, "codeuri", "python3.12")
+
+        log_mock.warning.assert_called_once()
+
 
 @patch("samcli.lib.build.build_graph.BuildGraph._write")
 @patch("samcli.lib.build.build_graph.BuildGraph._read")
@@ -851,3 +874,21 @@ class TestCachedOrIncrementalBuildStrategyWrapper(TestCase):
             else:
                 patched_cached_build_strategy.build_single_function_definition.assert_called_with(build_definition)
                 patched_incremental_build_strategy.assert_not_called()
+
+    @patch("samcli.lib.build.build_strategy.LOG")
+    @patch("samcli.lib.build.build_strategy.shadow_plan_build")
+    def test_shadow_mode_logs_mode_mismatch(self, shadow_plan_build_mock, log_mock, mocked_read, mocked_write):
+        shadow_plan_build_mock.return_value = {"mode": "cached"}
+        self.build_strategy._compare_rust_mode_plan("python3.12", "Fn", True)
+        log_mock.warning.assert_called_once()
+
+    @patch("samcli.lib.build.build_strategy.LOG")
+    @patch("samcli.lib.build.build_strategy.shadow_batch_plan_modes")
+    def test_batch_shadow_mode_logs_mode_mismatch(
+        self, shadow_batch_plan_modes_mock, log_mock, mocked_read, mocked_write
+    ):
+        definition = FunctionBuildDefinition("python3.12", "codeuri", None, "package_type", X86_64, {}, "handler")
+        self.build_graph.put_function_build_definition(definition, Mock(full_path="Fn"))
+        shadow_batch_plan_modes_mock.return_value = [("Fn", "cached")]
+        self.build_strategy._compare_rust_batch_mode_plans()
+        log_mock.warning.assert_called_once()
