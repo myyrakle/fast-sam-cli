@@ -3,6 +3,7 @@ Holds classes and utility methods related to build graph
 """
 
 import copy
+import json
 import logging
 import os
 import threading
@@ -17,6 +18,21 @@ from tomlkit.toml_document import TOMLDocument
 
 from samcli.commands._utils.experimental import ExperimentalFlag, is_experimental_enabled
 from samcli.lib.build.exceptions import InvalidBuildGraphException
+from samcli.lib.build.rust_backend import read_build_graph as rust_read_build_graph
+from samcli.lib.build.rust_backend import read_runtime_build_graph as rust_read_runtime_build_graph
+from samcli.lib.build.rust_backend import compare_definition_hashes as rust_compare_definition_hashes
+from samcli.lib.build.rust_backend import create_runtime_definition_record
+from samcli.lib.build.rust_backend import create_runtime_function_record, create_runtime_layer_record
+from samcli.lib.build.rust_backend import write_build_graph as rust_write_build_graph
+from samcli.lib.build.rust_backend import write_build_graph_compact as rust_write_build_graph_compact
+from samcli.lib.build.rust_backend import write_hash_updates as rust_write_hash_updates
+from samcli.lib.build.rust_compact import (
+    definition_function_rows,
+    definition_layer_rows,
+    json_repr,
+    persisted_function_rows,
+    persisted_layer_rows,
+)
 from samcli.lib.providers.provider import Function, LayerVersion
 from samcli.lib.samlib.resource_metadata_normalizer import (
     SAM_IS_NORMALIZED,
@@ -206,6 +222,7 @@ class BuildGraph:
         self._filepath = Path(build_dir).parent.joinpath(DEFAULT_BUILD_GRAPH_FILE_NAME)
         self._function_build_definitions: List["FunctionBuildDefinition"] = []
         self._layer_build_definitions: List["LayerBuildDefinition"] = []
+        self._runtime_state = None
         self._atomic_read()
 
     def get_function_build_definitions(self) -> Tuple["FunctionBuildDefinition", ...]:
@@ -213,6 +230,37 @@ class BuildGraph:
 
     def get_layer_build_definitions(self) -> Tuple["LayerBuildDefinition", ...]:
         return tuple(self._layer_build_definitions)
+
+    def definition_function_rows(self) -> List[tuple]:
+        if self._runtime_state is not None:
+            return list(self._runtime_state.definition_function_rows())
+        return definition_function_rows(self._function_build_definitions)
+
+    def definition_layer_rows(self) -> List[tuple]:
+        if self._runtime_state is not None:
+            return list(self._runtime_state.definition_layer_rows())
+        return definition_layer_rows(self._layer_build_definitions)
+
+    def persisted_function_rows(self) -> List[tuple]:
+        if self._runtime_state is not None:
+            return list(
+                self._runtime_state.persisted_function_rows(
+                    [
+                        [function.full_path for function in definition.functions]
+                        for definition in self._function_build_definitions
+                    ]
+                )
+            )
+        return persisted_function_rows(self._function_build_definitions)
+
+    def persisted_layer_rows(self) -> List[tuple]:
+        if self._runtime_state is not None:
+            return list(
+                self._runtime_state.persisted_layer_rows(
+                    [definition.layer.full_path for definition in self._layer_build_definitions]
+                )
+            )
+        return persisted_layer_rows(self._layer_build_definitions)
 
     def get_function_build_definition_with_full_path(
         self, function_full_path: str
@@ -273,6 +321,22 @@ class BuildGraph:
             )
             function_build_definition.add_function(function)
             self._function_build_definitions.append(function_build_definition)
+            self._runtime_state = None
+
+    def put_pre_deduped_function_build_definition(
+        self, function_build_definition: "FunctionBuildDefinition", functions: List[Function]
+    ) -> None:
+        """
+        Append a function build definition whose equivalence grouping was already
+        computed by a trusted caller.
+
+        This avoids repeating the quadratic Python-side dedupe scan after the
+        optional Rust backend has already produced unique function groups.
+        """
+        for function in functions:
+            function_build_definition.add_function(function)
+        self._function_build_definitions.append(function_build_definition)
+        self._runtime_state = None
 
     def put_layer_build_definition(self, layer_build_definition: "LayerBuildDefinition", layer: LayerVersion) -> None:
         """
@@ -308,6 +372,45 @@ class BuildGraph:
             )
             layer_build_definition.layer = layer
             self._layer_build_definitions.append(layer_build_definition)
+            self._runtime_state = None
+
+    def put_pre_deduped_layer_build_definition(
+        self, layer_build_definition: "LayerBuildDefinition", layer: LayerVersion
+    ) -> None:
+        """
+        Append a layer build definition whose equivalence grouping was already
+        computed by a trusted caller.
+        """
+        layer_build_definition.layer = layer
+        self._layer_build_definitions.append(layer_build_definition)
+        self._runtime_state = None
+
+    def populate_from_runtime_graph_plan(
+        self, runtime_graph_plan: Any, functions: List[Function], layers: List[LayerVersion]
+    ) -> None:
+        """
+        Replace the current Python facade lists from a Rust-owned graph plan.
+
+        The native plan already reconciled the current template resources with
+        persisted build state, so the Python graph only needs to attach provider
+        objects to the native runtime records.
+        """
+        function_build_definitions = []
+        for group, runtime_record in zip(runtime_graph_plan.function_groups(), runtime_graph_plan.function_records()):
+            function_build_definition = FunctionBuildDefinition.from_runtime_record(runtime_record)
+            for index in group:
+                function_build_definition.add_function(functions[index])
+            function_build_definitions.append(function_build_definition)
+
+        layer_build_definitions = []
+        for group, runtime_record in zip(runtime_graph_plan.layer_groups(), runtime_graph_plan.layer_records()):
+            layer_build_definition = LayerBuildDefinition.from_runtime_record(runtime_record)
+            layer_build_definition.layer = layers[group[-1]]
+            layer_build_definitions.append(layer_build_definition)
+
+        self._function_build_definitions = function_build_definitions
+        self._layer_build_definitions = layer_build_definitions
+        self._runtime_state = runtime_graph_plan.into_state()
 
     def clean_redundant_definitions_and_update(self, persist: bool) -> None:
         """
@@ -316,10 +419,13 @@ class BuildGraph:
 
         If persist parameter is given True, build graph is written to .aws-sam/build.toml file
         """
+        previous_counts = (len(self._function_build_definitions), len(self._layer_build_definitions))
         self._function_build_definitions[:] = [
             fbd for fbd in self._function_build_definitions if len(fbd.functions) > 0
         ]
         self._layer_build_definitions[:] = [bd for bd in self._layer_build_definitions if bd.layer]
+        if previous_counts != (len(self._function_build_definitions), len(self._layer_build_definitions)):
+            self._runtime_state = None
         if persist:
             self._atomic_write()
 
@@ -331,14 +437,59 @@ class BuildGraph:
         during the process of reading and modifying the hash value
         """
         with BuildGraph.__toml_lock:
+            # Rust-native graphs already have an owned runtime state. In that case
+            # we can compare against the persisted runtime state directly instead
+            # of round-tripping the whole Python graph through deepcopy -> _read()
+            # -> restore just to update hashes.
+            if self._runtime_state is not None:
+                persisted_runtime_graph = rust_read_runtime_build_graph(str(self._filepath))
+                if persisted_runtime_graph is not None:
+                    persisted_runtime_state = persisted_runtime_graph.into_state()
+                    rust_hash_changes = rust_compare_definition_hashes(
+                        self.definition_function_rows(),
+                        list(persisted_runtime_state.definition_function_rows()),
+                        self.definition_layer_rows(),
+                        list(persisted_runtime_state.definition_layer_rows()),
+                    )
+                    if rust_hash_changes is not None:
+                        function_content = {
+                            uuid: BuildHashingInformation(source_hash, manifest_hash)
+                            for uuid, source_hash, manifest_hash in rust_hash_changes[0]
+                        }
+                        layer_content = {
+                            uuid: BuildHashingInformation(source_hash, manifest_hash)
+                            for uuid, source_hash, manifest_hash in rust_hash_changes[1]
+                        }
+                        if function_content or layer_content:
+                            self._write_source_hash(function_content, layer_content)
+                        return
+
             stored_function_definitions = copy.deepcopy(self._function_build_definitions)
             stored_layer_definitions = copy.deepcopy(self._layer_build_definitions)
             self._read()
 
-            function_content = BuildGraph._compare_hash_changes(
-                stored_function_definitions, self._function_build_definitions
+            rust_hash_changes = rust_compare_definition_hashes(
+                definition_function_rows(stored_function_definitions),
+                self.definition_function_rows(),
+                definition_layer_rows(stored_layer_definitions),
+                self.definition_layer_rows(),
             )
-            layer_content = BuildGraph._compare_hash_changes(stored_layer_definitions, self._layer_build_definitions)
+            if rust_hash_changes is not None:
+                function_content = {
+                    uuid: BuildHashingInformation(source_hash, manifest_hash)
+                    for uuid, source_hash, manifest_hash in rust_hash_changes[0]
+                }
+                layer_content = {
+                    uuid: BuildHashingInformation(source_hash, manifest_hash)
+                    for uuid, source_hash, manifest_hash in rust_hash_changes[1]
+                }
+            else:
+                function_content = BuildGraph._compare_hash_changes(
+                    stored_function_definitions, self._function_build_definitions
+                )
+                layer_content = BuildGraph._compare_hash_changes(
+                    stored_layer_definitions, self._layer_build_definitions
+                )
 
             if function_content or layer_content:
                 self._write_source_hash(function_content, layer_content)
@@ -375,6 +526,19 @@ class BuildGraph:
         """
         Helper to write source_hash values to build.toml file
         """
+        if rust_write_hash_updates(
+            str(self._filepath),
+            [
+                (uuid, hashing_info.source_hash, hashing_info.manifest_hash)
+                for uuid, hashing_info in function_content.items()
+            ],
+            [
+                (uuid, hashing_info.source_hash, hashing_info.manifest_hash)
+                for uuid, hashing_info in layer_content.items()
+            ],
+        ):
+            return
+
         if not self._filepath.exists():
             open(self._filepath, "a+").close()  # pylint: disable=consider-using-with
 
@@ -410,6 +574,51 @@ class BuildGraph:
         LOG.debug("Instantiating build definitions")
         self._function_build_definitions = []
         self._layer_build_definitions = []
+        self._runtime_state = None
+        rust_runtime_graph = rust_read_runtime_build_graph(str(self._filepath))
+        if rust_runtime_graph is not None:
+            self._function_build_definitions = [
+                FunctionBuildDefinition.from_runtime_record(record) for record in rust_runtime_graph.function_records()
+            ]
+            self._layer_build_definitions = [
+                LayerBuildDefinition.from_runtime_record(record) for record in rust_runtime_graph.layer_records()
+            ]
+            self._runtime_state = rust_runtime_graph.into_state()
+            return
+
+        rust_document = rust_read_build_graph(str(self._filepath))
+        if rust_document is not None:
+            for definition in rust_document["function_build_definitions"]:
+                function_build_definition = FunctionBuildDefinition(
+                    definition.get(RUNTIME_FIELD),
+                    definition.get(CODE_URI_FIELD),
+                    None,
+                    definition.get(PACKAGETYPE_FIELD, ZIP),
+                    definition.get(ARCHITECTURE_FIELD, X86_64),
+                    definition.get(METADATA_FIELD, {}),
+                    definition.get(HANDLER_FIELD, ""),
+                    definition.get(SOURCE_HASH_FIELD, ""),
+                    definition.get(MANIFEST_HASH_FIELD, ""),
+                    definition.get(ENV_VARS_FIELD, {}),
+                )
+                function_build_definition.uuid = definition["uuid"]
+                self._function_build_definitions.append(function_build_definition)
+
+            for definition in rust_document["layer_build_definitions"]:
+                layer_build_definition = LayerBuildDefinition(
+                    definition.get(LAYER_NAME_FIELD, ""),
+                    definition.get(CODE_URI_FIELD),
+                    definition.get(BUILD_METHOD_FIELD),
+                    definition.get(COMPATIBLE_RUNTIMES_FIELD),
+                    definition.get(ARCHITECTURE_FIELD, X86_64),
+                    definition.get(SOURCE_HASH_FIELD, ""),
+                    definition.get(MANIFEST_HASH_FIELD, ""),
+                    definition.get(ENV_VARS_FIELD, {}),
+                )
+                layer_build_definition.uuid = definition["uuid"]
+                self._layer_build_definitions.append(layer_build_definition)
+            return
+
         document = {}
         try:
             txt = self._filepath.read_text()
@@ -449,6 +658,13 @@ class BuildGraph:
         function details will only be preserved as function names
         layer details will only be preserved as layer names
         """
+        if rust_write_build_graph_compact(
+            str(self._filepath),
+            self.persisted_function_rows(),
+            self.persisted_layer_rows(),
+        ):
+            return
+
         # convert build definition list into toml table
         function_build_definitions_table = tomlkit.table()
         for function_build_definition in self._function_build_definitions:
@@ -491,11 +707,12 @@ class AbstractBuildDefinition:
     def __init__(
         self, source_hash: str, manifest_hash: str, env_vars: Optional[Dict] = None, architecture: str = X86_64
     ) -> None:
-        self.uuid = str(uuid4())
-        self.source_hash = source_hash
-        self.manifest_hash = manifest_hash
+        self._uuid = str(uuid4())
+        self._source_hash = source_hash
+        self._manifest_hash = manifest_hash
+        self._runtime_record = create_runtime_definition_record(self._uuid, source_hash, manifest_hash)
         self._env_vars = env_vars if env_vars else {}
-        self.architecture = architecture
+        self._architecture = architecture
         # following properties are used during build time and they don't serialize into build.toml file
         self.download_dependencies: bool = True
 
@@ -504,8 +721,46 @@ class AbstractBuildDefinition:
         return str(os.path.join(DEFAULT_DEPENDENCIES_DIR, self.uuid))
 
     @property
+    def uuid(self) -> str:
+        return self._runtime_record.uuid if self._runtime_record is not None else self._uuid
+
+    @uuid.setter
+    def uuid(self, value: str) -> None:
+        if self._runtime_record is not None:
+            self._runtime_record.uuid = value
+        self._uuid = value
+
+    @property
+    def source_hash(self) -> str:
+        return self._runtime_record.source_hash if self._runtime_record is not None else self._source_hash
+
+    @source_hash.setter
+    def source_hash(self, value: str) -> None:
+        if self._runtime_record is not None:
+            self._runtime_record.source_hash = value
+        self._source_hash = value
+
+    @property
+    def manifest_hash(self) -> str:
+        return self._runtime_record.manifest_hash if self._runtime_record is not None else self._manifest_hash
+
+    @manifest_hash.setter
+    def manifest_hash(self, value: str) -> None:
+        if self._runtime_record is not None:
+            self._runtime_record.manifest_hash = value
+        self._manifest_hash = value
+
+    @property
     def env_vars(self) -> Dict:
+        if self._runtime_record is not None and hasattr(self._runtime_record, "env_vars_json"):
+            return json.loads(self._runtime_record.env_vars_json)
         return deepcopy(self._env_vars)
+
+    @property
+    def architecture(self) -> str:
+        if self._runtime_record is not None and hasattr(self._runtime_record, "architecture"):
+            return self._runtime_record.architecture
+        return self._architecture
 
     @abstractmethod
     def get_resource_full_paths(self) -> str:
@@ -529,13 +784,68 @@ class LayerBuildDefinition(AbstractBuildDefinition):
         env_vars: Optional[Dict] = None,
     ):
         super().__init__(source_hash, manifest_hash, env_vars, architecture)
-        self.full_path = full_path
-        self.codeuri = codeuri
-        self.build_method = build_method
-        self.compatible_runtimes = compatible_runtimes
+        self._full_path = full_path
+        self._codeuri = codeuri
+        self._build_method = build_method
+        self._compatible_runtimes = compatible_runtimes
+        runtime_record = create_runtime_layer_record(
+            self.uuid,
+            self.source_hash,
+            self.manifest_hash,
+            full_path,
+            codeuri,
+            build_method,
+            compatible_runtimes,
+            architecture,
+            self._env_vars,
+        )
+        if self._runtime_record is not None and type(self._runtime_record).__name__ != "RuntimeDefinitionRecord":
+            pass
+        elif runtime_record is not None:
+            self._runtime_record = runtime_record
+        elif type(self._runtime_record).__name__ == "RuntimeDefinitionRecord":
+            self._runtime_record = None
         # Note(xinhol): In our code, we assume "layer" is never None. We should refactor
         # this and move "layer" out of LayerBuildDefinition to take advantage of type check.
         self.layer: LayerVersion = None  # type: ignore
+
+    @classmethod
+    def from_runtime_record(cls, runtime_record: Any) -> "LayerBuildDefinition":
+        """Create the thin Python facade around a Rust-owned runtime record."""
+        build_definition = cls.__new__(cls)
+        build_definition._runtime_record = runtime_record
+        build_definition._uuid = runtime_record.uuid or str(uuid4())
+        if not runtime_record.uuid:
+            runtime_record.uuid = build_definition._uuid
+        build_definition._source_hash = runtime_record.source_hash
+        build_definition._manifest_hash = runtime_record.manifest_hash
+        build_definition._env_vars = {}
+        build_definition._architecture = runtime_record.architecture
+        build_definition.download_dependencies = True
+        build_definition._full_path = runtime_record.full_path
+        build_definition._codeuri = runtime_record.codeuri
+        build_definition._build_method = runtime_record.build_method
+        build_definition._compatible_runtimes = runtime_record.compatible_runtimes
+        build_definition.layer = None  # type: ignore
+        return build_definition
+
+    @property
+    def full_path(self) -> str:
+        return self._runtime_record.full_path if self._runtime_record is not None else self._full_path
+
+    @property
+    def codeuri(self) -> Optional[str]:
+        return self._runtime_record.codeuri if self._runtime_record is not None else self._codeuri
+
+    @property
+    def build_method(self) -> Optional[str]:
+        return self._runtime_record.build_method if self._runtime_record is not None else self._build_method
+
+    @property
+    def compatible_runtimes(self) -> Optional[List[str]]:
+        return (
+            self._runtime_record.compatible_runtimes if self._runtime_record is not None else self._compatible_runtimes
+        )
 
     def get_resource_full_paths(self) -> str:
         if not self.layer:
@@ -566,6 +876,14 @@ class LayerBuildDefinition(AbstractBuildDefinition):
         if not isinstance(other, LayerBuildDefinition):
             return False
 
+        if self._runtime_record is not None and other._runtime_record is not None:
+            try:
+                return self._runtime_record.equivalent_for_build(other._runtime_record)
+            except TypeError:
+                # Mixed legacy/runtime-record graphs can appear during default-on
+                # rollout; fall back to the established Python equality rules.
+                pass
+
         return (
             self.full_path == other.full_path
             and self.codeuri == other.codeuri
@@ -595,19 +913,87 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
         env_vars: Optional[Dict] = None,
     ) -> None:
         super().__init__(source_hash, manifest_hash, env_vars, architecture)
-        self.runtime = runtime
-        self.codeuri = codeuri
-        self.imageuri = imageuri
-        self.packagetype = packagetype
-        self.handler = handler
-
         # Skip SAM Added metadata properties
         metadata_copied = deepcopy(metadata) if metadata else {}
         metadata_copied.pop(SAM_RESOURCE_ID_KEY, "")
         metadata_copied.pop(SAM_IS_NORMALIZED, "")
-        self.metadata = metadata_copied
+
+        self._runtime = runtime
+        self._codeuri = codeuri
+        self._imageuri = imageuri
+        self._packagetype = packagetype
+        self._handler = handler
+        runtime_record = create_runtime_function_record(
+            self.uuid,
+            self.source_hash,
+            self.manifest_hash,
+            runtime,
+            codeuri,
+            imageuri,
+            packagetype,
+            architecture,
+            handler,
+            metadata_copied,
+            self._env_vars,
+        )
+        if self._runtime_record is not None and type(self._runtime_record).__name__ != "RuntimeDefinitionRecord":
+            pass
+        elif runtime_record is not None:
+            self._runtime_record = runtime_record
+        elif type(self._runtime_record).__name__ == "RuntimeDefinitionRecord":
+            self._runtime_record = None
+
+        self._metadata = metadata_copied
 
         self.functions: List[Function] = []
+
+    @classmethod
+    def from_runtime_record(cls, runtime_record: Any) -> "FunctionBuildDefinition":
+        """Create the thin Python facade around a Rust-owned runtime record."""
+        build_definition = cls.__new__(cls)
+        build_definition._runtime_record = runtime_record
+        build_definition._uuid = runtime_record.uuid or str(uuid4())
+        if not runtime_record.uuid:
+            runtime_record.uuid = build_definition._uuid
+        build_definition._source_hash = runtime_record.source_hash
+        build_definition._manifest_hash = runtime_record.manifest_hash
+        build_definition._env_vars = {}
+        build_definition._architecture = runtime_record.architecture
+        build_definition.download_dependencies = True
+        build_definition._runtime = runtime_record.runtime
+        build_definition._codeuri = runtime_record.codeuri
+        build_definition._imageuri = runtime_record.imageuri
+        build_definition._packagetype = runtime_record.packagetype
+        build_definition._handler = runtime_record.handler
+        build_definition._metadata = {}
+        build_definition.functions = []
+        return build_definition
+
+    @property
+    def runtime(self) -> Optional[str]:
+        return self._runtime_record.runtime if self._runtime_record is not None else self._runtime
+
+    @property
+    def codeuri(self) -> Optional[str]:
+        return self._runtime_record.codeuri if self._runtime_record is not None else self._codeuri
+
+    @property
+    def imageuri(self) -> Optional[str]:
+        return self._runtime_record.imageuri if self._runtime_record is not None else self._imageuri
+
+    @property
+    def packagetype(self) -> str:
+        return self._runtime_record.packagetype if self._runtime_record is not None else self._packagetype
+
+    @property
+    def handler(self) -> Optional[str]:
+        return self._runtime_record.handler if self._runtime_record is not None else self._handler
+
+    @property
+    def metadata(self) -> Dict:
+        if self._runtime_record is not None and hasattr(self._runtime_record, "metadata_json"):
+            return json.loads(self._runtime_record.metadata_json)
+        return self._metadata
 
     def add_function(self, function: Function) -> None:
         self.functions.append(function)
@@ -675,6 +1061,17 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
         """
         if not isinstance(other, FunctionBuildDefinition):
             return False
+
+        if self._runtime_record is not None and other._runtime_record is not None:
+            try:
+                return self._runtime_record.equivalent_for_build(
+                    other._runtime_record,
+                    self.metadata.get("BuildMethod") if self.metadata else None,
+                )
+            except TypeError:
+                # Mixed legacy/runtime-record graphs can appear during default-on
+                # rollout; fall back to the established Python equality rules.
+                pass
 
         # each build with custom Makefile definition should be handled separately
         if self.metadata and self.metadata.get("BuildMethod", None) == "makefile":

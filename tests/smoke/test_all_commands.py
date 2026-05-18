@@ -73,7 +73,7 @@ class TestAllCommands(TestCase):
         )
 
     def run_and_verify_no_crash(self, cmd_name, args):
-        sam_cmd = "samdev" if os.getenv("SAM_CLI_DEV", 0) else "sam"
+        sam_cmd = "fsam"
         # if a previous smoke test run have been killed, re-running them will fail. so run them in a temp folder
         with tempfile.TemporaryDirectory() as temp:
             # Create isolated config directory for each test to prevent metadata.json conflicts

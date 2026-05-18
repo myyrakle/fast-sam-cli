@@ -17,7 +17,7 @@ class DeployRegressionBase(TestCase):
     def base_command(self, base):
         command = [base]
         if os.getenv("SAM_CLI_DEV") and base == "sam":
-            command = ["samdev"]
+            command = ["fsam"]
         elif base == "aws":
             command = [base, "cloudformation"]
 

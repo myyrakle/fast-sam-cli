@@ -127,7 +127,7 @@ cat installer/pyinstaller/samcli-mac.spec
 
 # Organizing the pyinstaller-output folder
 mkdir pyinstaller-output
-dist_folder="sam"
+dist_folder="fsam"
 if [ "$is_nightly" = "true" ]; then
     echo "using dist_folder with nightly/beta build"
     dist_folder=$build_binary_name
@@ -140,7 +140,7 @@ if [ "$is_nightly" = "true" ]; then
     echo "Updating install script with nightly/beta build"
     # If nightly build, replace the build folder and build_binary_name in the install script
     sed -i.bak "s/\/usr\/local\/aws-sam-cli/\/usr\/local\/$build_folder/g" pyinstaller-output/install
-    sed -i.bak 's/EXE_NAME=\"sam\"/EXE_NAME=\"'"$build_binary_name"'\"/g' pyinstaller-output/install
+    sed -i.bak 's/EXE_NAME=\"fsam\"/EXE_NAME=\"'"$build_binary_name"'\"/g' pyinstaller-output/install
     rm pyinstaller-output/install.bak
 fi
 echo "install script content is:"

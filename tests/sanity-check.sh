@@ -13,9 +13,9 @@ if [ "$CI_OVERRIDE" = "1" ]; then
 elif [ "$IS_NIGHTLY" = "1" ]; then
     sam_binary="sam-nightly"
 elif [ "$SAM_CLI_DEV" = "1" ]; then
-    sam_binary="samdev"
+    sam_binary="fsam"
 else
-    sam_binary="sam"
+    sam_binary="fsam"
 fi
 
 if ! command -v "$sam_binary" &> /dev/null; then

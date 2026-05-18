@@ -1,6 +1,6 @@
 # -*- mode: python -*-
 block_cipher = None
-exe_name = 'sam'
+exe_name = 'fsam'
 analysis = Analysis(
     ['../../samcli/__main__.py'],
     binaries=[],
@@ -31,5 +31,5 @@ coll = COLLECT(
     analysis.datas,
     strip=False,
     upx=True,
-    name='sam'
+    name='fsam'
 )
