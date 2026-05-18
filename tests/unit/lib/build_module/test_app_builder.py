@@ -3665,3 +3665,113 @@ class TestApplicationBuilderGetWorkingDirectoryPath(TestCase):
 
         working_dir = ApplicationBuilder._get_working_directory_path("base_dir", metadata, "source_dir", "scratch_dir")
         self.assertEqual(working_dir, PathValidator(str(os.path.join("source_dir", "working", "dir"))))
+
+
+class TestApplicationBuilderGraphFallback(TestCase):
+    @patch.object(ApplicationBuilder, "_populate_layer_build_definitions_python")
+    @patch.object(ApplicationBuilder, "_populate_function_build_definitions_python")
+    def test_without_runtime_plan_uses_legacy_python_materialization_when_no_rust_groups(
+        self, populate_functions, populate_layers
+    ):
+        build_graph = Mock()
+        functions = [Mock()]
+        layers = [Mock()]
+
+        ApplicationBuilder._populate_build_graph_without_runtime_plan(
+            build_graph,
+            functions,
+            {"Fn": {}},
+            layers,
+            {"Layer": {}},
+        )
+
+        populate_functions.assert_called_once_with(build_graph, functions, {"Fn": {}})
+        populate_layers.assert_called_once_with(build_graph, layers, {"Layer": {}})
+
+    @patch.object(ApplicationBuilder, "_populate_layer_build_definitions_from_rust_indexes")
+    @patch.object(ApplicationBuilder, "_populate_function_build_definitions_from_rust_indexes")
+    def test_without_runtime_plan_uses_rust_index_materialization_when_groups_exist(
+        self, populate_functions, populate_layers
+    ):
+        build_graph = Mock()
+        functions = [Mock()]
+        layers = [Mock()]
+        rust_groups = ([[0]], [[0]])
+
+        ApplicationBuilder._populate_build_graph_without_runtime_plan(
+            build_graph,
+            functions,
+            {"Fn": {}},
+            layers,
+            {"Layer": {}},
+            rust_groups,
+        )
+
+        populate_functions.assert_called_once_with(build_graph, functions, {"Fn": {}}, [[0]])
+        populate_layers.assert_called_once_with(build_graph, layers, {"Layer": {}}, [[0]])
+
+    @patch("samcli.lib.build.app_builder.plan_graph_groups")
+    @patch("samcli.lib.build.app_builder.reconcile_graph_plan")
+    @patch("samcli.lib.build.app_builder.rust_current_graph_rows")
+    def test_legacy_compact_graph_fallback_prefers_native_rows(
+        self, current_graph_rows, reconcile_graph_plan_mock, plan_graph_groups_mock
+    ):
+        current_graph_rows.return_value = ([("fn",)], [("layer",)])
+        reconcile_graph_plan_mock.return_value = None
+        plan_graph_groups_mock.return_value = ([[0]], [[0]])
+
+        with self.assertLogs("samcli.lib.build.app_builder", level="DEBUG") as logs:
+            result = ApplicationBuilder._legacy_compact_graph_fallback(
+                Mock(), ["fn"], {"Fn": {}}, ["layer"], {"Layer": {}}
+            )
+
+        self.assertEqual(result, (None, ([[0]], [[0]]), ([("fn",)], [("layer",)])))
+        current_graph_rows.assert_called_once_with(["fn"], {"Fn": {}}, ["layer"], {"Layer": {}})
+        self.assertIn("entering legacy compact graph fallback", "\n".join(logs.output))
+        self.assertIn("using native compact-row compatibility API", "\n".join(logs.output))
+
+    @patch.object(ApplicationBuilder, "_compact_layer_graph_inputs", return_value=[("py-layer",)])
+    @patch.object(ApplicationBuilder, "_compact_function_graph_inputs", return_value=[("py-fn",)])
+    @patch("samcli.lib.build.app_builder.reconcile_graph_plan")
+    @patch("samcli.lib.build.app_builder.rust_current_graph_rows", return_value=None)
+    def test_legacy_compact_graph_fallback_uses_python_rows_as_final_floor(
+        self,
+        _current_graph_rows,
+        reconcile_graph_plan_mock,
+        compact_function_rows,
+        compact_layer_rows,
+    ):
+        graph_plan = Mock()
+        reconcile_graph_plan_mock.return_value = graph_plan
+
+        with self.assertLogs("samcli.lib.build.app_builder", level="DEBUG") as logs:
+            result = ApplicationBuilder._legacy_compact_graph_fallback(
+                Mock(), ["fn"], {"Fn": {}}, ["layer"], {"Layer": {}}
+            )
+
+        self.assertEqual(result, (graph_plan, None, ([("py-fn",)], [("py-layer",)])))
+        compact_function_rows.assert_called_once_with(["fn"], {"Fn": {}})
+        compact_layer_rows.assert_called_once_with(["layer"], {"Layer": {}})
+        self.assertIn("generating compact rows in Python", "\n".join(logs.output))
+
+    @patch.object(ApplicationBuilder, "_populate_layer_build_definitions_python")
+    @patch.object(ApplicationBuilder, "_populate_function_build_definitions_python")
+    def test_without_runtime_plan_logs_legacy_python_materialization(self, populate_functions, populate_layers):
+        with self.assertLogs("samcli.lib.build.app_builder", level="DEBUG") as logs:
+            ApplicationBuilder._populate_build_graph_without_runtime_plan(
+                Mock(), [Mock()], {"Fn": {}}, [Mock()], {"Layer": {}}
+            )
+
+        self.assertIn("using legacy Python dedupe", "\n".join(logs.output))
+
+    @patch.object(ApplicationBuilder, "_populate_layer_build_definitions_from_rust_indexes")
+    @patch.object(ApplicationBuilder, "_populate_function_build_definitions_from_rust_indexes")
+    def test_without_runtime_plan_logs_python_compatibility_materialization(
+        self, populate_functions, populate_layers
+    ):
+        with self.assertLogs("samcli.lib.build.app_builder", level="DEBUG") as logs:
+            ApplicationBuilder._populate_build_graph_without_runtime_plan(
+                Mock(), [Mock()], {"Fn": {}}, [Mock()], {"Layer": {}}, ([[0]], [[0]])
+            )
+
+        self.assertIn("materializing compatibility groups in Python", "\n".join(logs.output))

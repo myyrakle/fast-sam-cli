@@ -134,6 +134,7 @@ class BuildStrategyTest(BuildStrategyBaseTest):
             ]
         )
 
+    @patch.dict("os.environ", {"SAM_CLI_RUST_BUILD_CORE": "0"})
     @patch("samcli.lib.build.build_strategy.pathlib")
     @patch("samcli.lib.build.build_strategy.shutil")
     def test_clean_redundant_folders(self, patched_shutil, patched_pathlib):
@@ -534,6 +535,7 @@ class CachedBuildStrategyTest(BuildStrategyBaseTest):
             build_layer_mock.assert_called_once()
             self.assertEqual(copytree_mock.call_count, 2)
 
+    @patch.dict("os.environ", {"SAM_CLI_RUST_BUILD_CORE": "0"})
     def test_redundant_cached_should_be_clean(self):
         with osutils.mkdir_temp() as temp_base_dir:
             build_dir = Path(temp_base_dir, ".aws-sam", "build")
