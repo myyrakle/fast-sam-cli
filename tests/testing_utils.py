@@ -104,7 +104,7 @@ def get_sam_command():
     windows_bin_path = os.getenv("SAM_WINDOWS_BINARY_PATH")
     if windows_bin_path:
         return windows_bin_path
-    return "samdev" if os.getenv("SAM_CLI_DEV") else "sam"
+    return "fsam"
 
 
 def get_build_command_list(

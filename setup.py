@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 
-import os
 from setuptools import setup
 
-# When SAM_CLI_DEV is set, register "samdev" as the console script instead of "sam".
+# This fork intentionally exposes a distinct executable name so it can be
+# installed alongside the upstream AWS SAM CLI without shadowing `sam`.
 # All other metadata (name, version, dependencies, etc.) is defined in pyproject.toml.
-cmd_name = "samdev" if os.getenv("SAM_CLI_DEV") else "sam"
+cmd_name = "fsam"
 
 setup(
     entry_points={
