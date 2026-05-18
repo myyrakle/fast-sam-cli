@@ -128,11 +128,20 @@ echo "Installing PyInstaller"
 ./venv/bin/pip install -r src/requirements/pyinstaller-build.txt
 ./venv/bin/pip check
 
+echo "Installing Rust"
+curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+export PATH="$HOME/.cargo/bin:$PATH"
+
+echo "Building Rust extension"
+cd src
+./scripts/build-rust-extension.sh
+cd ..
+
 echo "Building Binary"
 cd src
 if [ "$is_nightly" = "true" ]; then
     echo "Updating samcli.spec with nightly/beta build"
-    sed -i.bak "s/'sam'/'$build_binary_name'/g" installer/pyinstaller/samcli.spec
+    sed -i.bak "s/'fsam'/'$build_binary_name'/g" installer/pyinstaller/samcli.spec
     rm installer/pyinstaller/samcli.spec.bak
 fi
 echo "samcli.spec content is:"
@@ -142,7 +151,8 @@ cat installer/pyinstaller/samcli.spec
 ../venv/bin/python -m PyInstaller --clean installer/pyinstaller/samcli.spec
 
 
-mkdir pyinstaller-output
+mkdir -p pyinstaller-output
+mkdir -p pyinstaller-output/dist
 dist_folder="fsam"
 if [ "$is_nightly" = "true" ]; then
     echo "using dist_folder with nightly/beta build"
