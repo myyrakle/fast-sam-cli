@@ -1,0 +1,76 @@
+name: Build fsam Linux artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "fsam-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: build-fsam-linux-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            manylinux_image: quay.io/pypa/manylinux2014_x86_64:latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            manylinux_image: quay.io/pypa/manylinux2014_aarch64:latest
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Make installer script executable
+        run: chmod +x ./installer/pyinstaller/build-linux.sh
+
+      - name: Build fsam zip in manylinux container
+        run: |
+          for i in 1 2 3; do
+            docker run --rm \
+              -v "$PWD":/samcli \
+              -w /samcli \
+              "${{ matrix.manylinux_image }}" \
+              /samcli/installer/pyinstaller/build-linux.sh "fsam-linux-${{ matrix.arch }}.zip" \
+              && break
+            echo "Attempt $i failed, retrying..."
+            sleep 10
+          done
+
+      - name: Smoke test artifact
+        run: |
+          unzip ".build/output/fsam-linux-${{ matrix.arch }}.zip" -d fsam-installation
+          sudo ./fsam-installation/install
+          fsam --version
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: fsam-linux-${{ matrix.arch }}
+          path: .build/output/fsam-linux-${{ matrix.arch }}.zip
+          retention-days: 30
+
+  publish-release:
+    name: publish-fsam-release-assets
+    if: startsWith(github.ref, 'refs/tags/fsam-v')
+    needs: build-linux
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/fsam-linux-amd64.zip
+            release-assets/fsam-linux-arm64.zip

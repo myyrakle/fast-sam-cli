@@ -117,7 +117,7 @@ cd src
 if [ "$is_nightly" = "true" ]; then
     # If nightly build, replace the exe_name in spec file with build_binary_name
     echo "Updating samcli-mac.spec with nightly/beta build"
-    sed -i.bak "s/'sam'/'$build_binary_name'/g" installer/pyinstaller/samcli-mac.spec
+    sed -i.bak "s/'fsam'/'$build_binary_name'/g" installer/pyinstaller/samcli-mac.spec
     rm installer/pyinstaller/samcli-mac.spec.bak
 fi
 echo "samcli-mac.spec content is:"
