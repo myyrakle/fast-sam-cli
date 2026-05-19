@@ -12,6 +12,11 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from samcli.lib.build.app_builder import ApplicationBuilder, ApplicationBuildResult
 from samcli.lib.build.build_graph import BuildGraph
+from samcli.lib.build.rust_backend import (
+    create_lambda_zip_with_sha256,
+    function_resource_api_call_rows,
+    sha256_file_checksum,
+)
 from samcli.lib.package.s3_uploader import S3Uploader
 from samcli.lib.package.utils import make_zip_with_lambda_permissions
 from samcli.lib.providers.provider import Stack
@@ -100,9 +105,13 @@ class ZipFunctionSyncFlow(FunctionSyncFlow):
             self._build_resources_from_scratch()
 
         zip_file_path = os.path.join(tempfile.gettempdir(), "data-" + uuid.uuid4().hex)
-        self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
+        rust_artifact = create_lambda_zip_with_sha256(zip_file_path, cast(str, self._artifact_folder))
+        if rust_artifact is not None:
+            self._zip_file, self._local_sha = rust_artifact
+        else:
+            self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
+            self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
 
     def _use_prebuilt_resources(self, application_build_result: ApplicationBuildResult) -> None:
         """Uses pre-built artifacts and assigns build_graph and artifacts_folder"""
@@ -187,6 +196,18 @@ class ZipFunctionSyncFlow(FunctionSyncFlow):
             os.remove(self._zip_file)
 
     def _get_resource_api_calls(self) -> List[ResourceAPICall]:
+        native_rows = function_resource_api_call_rows(
+            self._function_identifier,
+            [layer.full_path for layer in self._function.layers],
+            self._function.codeuri,
+            self.auto_publish_latest_invocable,
+        )
+        if native_rows is not None:
+            return [
+                ResourceAPICall(resource, [ApiCallTypes(api_call) for api_call in api_calls])
+                for resource, api_calls in native_rows
+            ]
+
         resource_calls = list()
         resource_calls.extend(self._get_layers_api_calls())
         resource_calls.extend(self._get_codeuri_api_calls())
@@ -236,7 +257,7 @@ class ZipFunctionSyncFlowSkipBuildZipFile(ZipFunctionSyncFlow):
         self._zip_file = os.path.join(tempfile.gettempdir(), f"data-{uuid.uuid4().hex}")
         shutil.copy2(cast(str, self._function.codeuri), self._zip_file)
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(self._zip_file, hashlib.sha256())
+        self._local_sha = sha256_file_checksum(self._zip_file) or file_checksum(self._zip_file, hashlib.sha256())
 
 
 class ZipFunctionSyncFlowSkipBuildDirectory(ZipFunctionSyncFlow):
@@ -247,6 +268,10 @@ class ZipFunctionSyncFlowSkipBuildDirectory(ZipFunctionSyncFlow):
 
     def gather_resources(self) -> None:
         zip_file_path = os.path.join(tempfile.gettempdir(), f"data-{uuid.uuid4().hex}")
-        self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._function.codeuri)
+        rust_artifact = create_lambda_zip_with_sha256(zip_file_path, cast(str, self._function.codeuri))
+        if rust_artifact is not None:
+            self._zip_file, self._local_sha = rust_artifact
+        else:
+            self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._function.codeuri)
+            self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())

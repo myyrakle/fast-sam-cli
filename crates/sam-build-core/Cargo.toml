@@ -10,9 +10,10 @@ md-5 = "0.10"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 toml = "0.8"
+time = { version = "0.3", features = ["parsing"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
-

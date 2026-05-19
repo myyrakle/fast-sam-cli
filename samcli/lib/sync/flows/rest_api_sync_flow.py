@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set, cast
 
 from botocore.exceptions import ClientError
 
+from samcli.lib.build.rust_backend import collect_rest_api_stage_names
 from samcli.lib.providers.exceptions import MissingLocalDefinition
 from samcli.lib.providers.provider import ResourceIdentifier, Stack, get_resource_by_id, get_resource_ids_by_type
 from samcli.lib.sync.flows.generic_api_sync_flow import GenericApiSyncFlow
@@ -115,39 +116,70 @@ class RestApiSyncFlow(GenericApiSyncFlow):
         api_resource = get_resource_by_id(self._stacks, ResourceIdentifier(self._api_identifier))
         stage_resources = get_resource_ids_by_type(self._stacks, AWS_APIGATEWAY_STAGE)
         deployment_resources = get_resource_ids_by_type(self._stacks, AWS_APIGATEWAY_DEPLOYMENT)
+        deployment_resource_ids = [deployment_resource.resource_iac_id for deployment_resource in deployment_resources]
 
         stages = set()
+        remote_stage_names = []
         # If it is a SAM resource, get the StageName property
         if api_resource:
             if api_resource.get("Type") == AWS_SERVERLESS_API:
                 # The customer defined stage name
                 stage_name = api_resource.get("Properties", {}).get("StageName")
-                if stage_name:
-                    stages.add(cast(str, stage_name))
 
                 # The stage called "Stage"
                 if stage_name != "Stage":
                     response_sta = cast(Dict, self._api_client.get_stages(restApiId=self._api_physical_id))
-                    for item in response_sta.get("item"):  # type: ignore
-                        if item.get("stageName") == "Stage":
-                            stages.add("Stage")
+                    remote_stage_names = [
+                        cast(str, item.get("stageName")) for item in response_sta.get("item") if item.get("stageName")
+                    ]  # type: ignore
+
+                if stage_name:
+                    stages.add(cast(str, stage_name))
+
+                if "Stage" in remote_stage_names:
+                    stages.add("Stage")
 
         # For both SAM and ApiGateway resource, check if any refs from stage resources
+        stage_rows = []
         for stage_resource in stage_resources:
             # RestApiId is a required field in stage
             stage_dict = get_resource_by_id(self._stacks, stage_resource)
             if not stage_dict:
                 continue
-            rest_api_id = stage_dict.get("Properties", {}).get("RestApiId")
-            dep_id = stage_dict.get("Properties", {}).get("DeploymentId")
+            stage_properties = stage_dict.get("Properties", {})
+            rest_api_id = stage_properties.get("RestApiId")
+            dep_id = stage_properties.get("DeploymentId")
+            stage_name = stage_properties.get("StageName")
+            stage_rows.append(
+                (
+                    cast(Optional[str], stage_name) if isinstance(stage_name, str) else None,
+                    cast(Optional[str], rest_api_id) if isinstance(rest_api_id, str) else None,
+                    cast(Optional[str], dep_id) if isinstance(dep_id, str) else None,
+                )
+            )
+
+        native_stages = collect_rest_api_stage_names(
+            self._api_identifier,
+            cast(Optional[str], api_resource.get("Type")) if api_resource and isinstance(api_resource.get("Type"), str) else None,
+            (
+                cast(Optional[str], api_resource.get("Properties", {}).get("StageName"))
+                if api_resource and isinstance(api_resource.get("Properties", {}).get("StageName"), str)
+                else None
+            ),
+            remote_stage_names,
+            stage_rows,
+            deployment_resource_ids,
+        )
+        if native_stages is not None:
+            return native_stages
+
+        for stage_name, rest_api_id, dep_id in stage_rows:
             # If the stage doesn't have a deployment associated then no need to update
             if dep_id is None:
                 continue
             # If the stage's deployment ID is not static and the rest API ID matchs, then update
-            for deployment_resource in deployment_resources:
-                if deployment_resource.resource_iac_id == dep_id and rest_api_id == self._api_identifier:
-                    stages.add(cast(str, stage_dict.get("Properties", {}).get("StageName")))
-                    break
+            if rest_api_id == self._api_identifier and dep_id in deployment_resource_ids and stage_name is not None:
+                stages.add(stage_name)
 
         return stages
 

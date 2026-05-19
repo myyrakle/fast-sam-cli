@@ -13,6 +13,7 @@ from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from samcli.lib.build.app_builder import ApplicationBuilder, ApplicationBuildResult
+from samcli.lib.build.rust_backend import create_lambda_zip_with_sha256, dependent_function_ids, sha256_file_checksum
 from samcli.lib.package.utils import make_zip_with_lambda_permissions
 from samcli.lib.providers.provider import Function, LayerVersion, ResourceIdentifier, Stack, get_resource_by_id
 from samcli.lib.providers.sam_function_provider import SamFunctionProvider
@@ -259,9 +260,13 @@ class LayerSyncFlow(AbstractLayerSyncFlow):
             self._build_resources_from_scratch()
 
         zip_file_path = os.path.join(tempfile.gettempdir(), f"data-{uuid.uuid4().hex}")
-        self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
+        rust_artifact = create_lambda_zip_with_sha256(zip_file_path, cast(str, self._artifact_folder))
+        if rust_artifact is not None:
+            self._zip_file, self._local_sha = rust_artifact
+        else:
+            self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
+            self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
 
     def _use_prebuilt_resources(self, application_build_result: ApplicationBuildResult) -> None:
         """Uses pre-build artifacts and assigns artifact_folder"""
@@ -292,16 +297,30 @@ class LayerSyncFlow(AbstractLayerSyncFlow):
 
     def _get_dependent_functions(self) -> List[Function]:
         function_provider = SamFunctionProvider(cast(List[Stack], self._stacks), locate_layer_nested=True)
+        functions = function_provider.get_all()
 
-        dependent_functions = []
-        for function in function_provider.get_all():
-            if self._layer_identifier in [layer.full_path for layer in function.layers]:
-                LOG.debug(
-                    "%sAdding function %s for updating its Layers with this new version",
-                    self.log_prefix,
-                    function.name,
-                )
-                dependent_functions.append(function)
+        rust_dependent_function_ids = dependent_function_ids(
+            self._layer_identifier,
+            [(function.full_path, [layer.full_path for layer in function.layers]) for function in functions],
+        )
+        if rust_dependent_function_ids is not None:
+            dependent_function_id_set = set(rust_dependent_function_ids)
+            dependent_functions = [
+                function for function in functions if function.full_path in dependent_function_id_set
+            ]
+        else:
+            dependent_functions = [
+                function
+                for function in functions
+                if self._layer_identifier in [layer.full_path for layer in function.layers]
+            ]
+
+        for function in dependent_functions:
+            LOG.debug(
+                "%sAdding function %s for updating its Layers with this new version",
+                self.log_prefix,
+                function.name,
+            )
         return dependent_functions
 
 
@@ -312,9 +331,13 @@ class LayerSyncFlowSkipBuildDirectory(LayerSyncFlow):
 
     def gather_resources(self) -> None:
         zip_file_path = os.path.join(tempfile.gettempdir(), f"data-{uuid.uuid4().hex}")
-        self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._layer.codeuri)
+        rust_artifact = create_lambda_zip_with_sha256(zip_file_path, cast(str, self._layer.codeuri))
+        if rust_artifact is not None:
+            self._zip_file, self._local_sha = rust_artifact
+        else:
+            self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._layer.codeuri)
+            self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
 
 
 class LayerSyncFlowSkipBuildZipFile(LayerSyncFlow):
@@ -326,7 +349,7 @@ class LayerSyncFlowSkipBuildZipFile(LayerSyncFlow):
         self._zip_file = os.path.join(tempfile.gettempdir(), f"data-{uuid.uuid4().hex}")
         shutil.copy2(cast(str, self._layer.codeuri), self._zip_file)
         LOG.debug("%sCreated artifact ZIP file: %s", self.log_prefix, self._zip_file)
-        self._local_sha = file_checksum(self._zip_file, hashlib.sha256())
+        self._local_sha = sha256_file_checksum(self._zip_file) or file_checksum(self._zip_file, hashlib.sha256())
 
 
 class FunctionLayerReferenceSync(SyncFlow):

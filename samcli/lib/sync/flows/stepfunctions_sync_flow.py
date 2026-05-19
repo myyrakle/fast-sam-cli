@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from samcli.lib.build.rust_backend import read_definition_text_with_sha256
 from samcli.lib.providers.exceptions import MissingLocalDefinition
 from samcli.lib.providers.provider import ResourceIdentifier, Stack, get_resource_by_id
 from samcli.lib.sync.exceptions import InfraSyncRequiredError
@@ -86,6 +87,13 @@ class StepFunctionsSyncFlow(SyncFlow):
         if definition_substitutions:
             raise InfraSyncRequiredError(self._state_machine_identifier, "DefinitionSubstitutions field is specified.")
         self._definition_uri = self._get_definition_file(self._state_machine_identifier)
+        native_definition = (
+            read_definition_text_with_sha256(self._definition_uri) if self._definition_uri is not None else None
+        )
+        if native_definition is not None:
+            self._states_definition, self._local_sha = native_definition
+            return
+
         self._states_definition = self._process_definition_file()
         if self._states_definition:
             self._local_sha = str_checksum(self._states_definition, hashlib.sha256())

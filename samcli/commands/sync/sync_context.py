@@ -14,6 +14,12 @@ from tomlkit.items import Item
 from tomlkit.toml_document import TOMLDocument
 
 from samcli.lib.build.build_graph import DEFAULT_DEPENDENCIES_DIR
+from samcli.lib.build.rust_backend import (
+    create_runtime_sync_state as rust_create_runtime_sync_state,
+    read_runtime_sync_state as rust_read_runtime_sync_state,
+    read_sync_state_compact as rust_read_sync_state_compact,
+    write_sync_state_compact as rust_write_sync_state_compact,
+)
 from samcli.lib.utils.osutils import rmtree_if_exists
 
 LOG = logging.getLogger(__name__)
@@ -201,6 +207,7 @@ class SyncContext:
     _build_dir: Path
     _cache_dir: Path
     _file_path: Path
+    _runtime_state: Optional[object]
     skip_deploy_sync: bool
 
     def __init__(
@@ -212,6 +219,7 @@ class SyncContext:
     ):
         self._current_state = SyncState(dependency_layer, dict(), None)
         self._previous_state = None
+        self._runtime_state = None
         self.skip_deploy_sync = skip_deploy_sync
         self._build_dir = Path(build_dir)
         self._cache_dir = Path(cache_dir)
@@ -240,7 +248,10 @@ class SyncContext:
         """
         with _lock:
             LOG.debug("Updating latest_infra_sync_time in sync state")
-            self._current_state.update_infra_sync_time()
+            sync_time = datetime.now(timezone.utc)
+            self._current_state.latest_infra_sync_time = sync_time
+            if self._runtime_state is not None:
+                self._runtime_state.update_infra_sync_time(sync_time.timestamp())
             self._write()
 
     def get_latest_infra_sync_time(self) -> Optional[datetime]:
@@ -253,7 +264,11 @@ class SyncContext:
             The last infra sync time if it exists
         """
         with _lock:
-            infra_sync_time = self._current_state.latest_infra_sync_time
+            infra_sync_time = (
+                datetime.fromtimestamp(self._runtime_state.latest_infra_sync_time, tz=timezone.utc)
+                if self._runtime_state is not None and self._runtime_state.latest_infra_sync_time is not None
+                else self._current_state.latest_infra_sync_time
+            )
             if not infra_sync_time:
                 LOG.debug("No record of previous infrastructure sync time found from sync.toml file")
                 return None
@@ -274,7 +289,10 @@ class SyncContext:
         """
         with _lock:
             LOG.debug("Updating resource_sync_state for resource %s with hash %s", resource_id, hash_value)
-            self._current_state.update_resource_sync_state(resource_id, hash_value)
+            sync_time = datetime.now(timezone.utc)
+            self._current_state.resource_sync_states[resource_id] = ResourceSyncState(hash_value, sync_time)
+            if self._runtime_state is not None:
+                self._runtime_state.update_resource_sync_state(resource_id, hash_value, sync_time.timestamp())
             self._write()
 
     def get_resource_latest_sync_hash(self, resource_id: str) -> Optional[str]:
@@ -293,6 +311,11 @@ class SyncContext:
             The hash of the resource stored in resource_sync_state if it exists
         """
         with _lock:
+            if self._runtime_state is not None:
+                hash_value = self._runtime_state.get_resource_latest_sync_hash(resource_id)
+                if hash_value is not None:
+                    LOG.debug("Latest resource_sync_state hash %s found for resource %s", resource_id, hash_value)
+                    return hash_value
             resource_sync_state = self._current_state.resource_sync_states.get(resource_id)
             if not resource_sync_state:
                 LOG.debug("No record of latest hash found for resource %s found in sync.toml file", resource_id)
@@ -303,10 +326,40 @@ class SyncContext:
             return resource_sync_state.hash_value
 
     def _write(self) -> None:
+        if self._runtime_state is not None:
+            try:
+                self._runtime_state.write(str(self._file_path))
+                return
+            except (OSError, TypeError):
+                pass
+        if rust_write_sync_state_compact(
+            str(self._file_path),
+            self._current_state.dependency_layer,
+            self._current_state.latest_infra_sync_time.timestamp()
+            if self._current_state.latest_infra_sync_time
+            else None,
+            [
+                (resource_id, state.hash_value, state.sync_time.timestamp())
+                for resource_id, state in self._current_state.resource_sync_states.items()
+            ],
+        ):
+            return
         with open(self._file_path, "w+") as file:
             file.write(tomlkit.dumps(_sync_state_to_toml_document(self._current_state)))
 
     def _read(self) -> None:
+        self._runtime_state = rust_read_runtime_sync_state(str(self._file_path))
+        if self._runtime_state is not None:
+            self._previous_state = self._sync_state_from_runtime(self._runtime_state)
+            self._current_state.resource_sync_states = self._previous_state.resource_sync_states
+            self._current_state.latest_infra_sync_time = self._previous_state.latest_infra_sync_time
+            return
+        rust_state = rust_read_sync_state_compact(str(self._file_path))
+        if rust_state is not None:
+            self._previous_state = self._sync_state_from_rows(*rust_state)
+            self._current_state.resource_sync_states = self._previous_state.resource_sync_states
+            self._current_state.latest_infra_sync_time = self._previous_state.latest_infra_sync_time
+            return
         try:
             with open(self._file_path) as file:
                 toml_document = cast(Dict, tomlkit.loads(file.read()))
@@ -314,8 +367,43 @@ class SyncContext:
             if self._previous_state:
                 self._current_state.resource_sync_states = self._previous_state.resource_sync_states
                 self._current_state.latest_infra_sync_time = self._previous_state.latest_infra_sync_time
+                self._runtime_state = rust_create_runtime_sync_state(
+                    self._previous_state.dependency_layer,
+                    self._previous_state.latest_infra_sync_time.timestamp()
+                    if self._previous_state.latest_infra_sync_time
+                    else None,
+                    [
+                        (resource_id, state.hash_value, state.sync_time.timestamp())
+                        for resource_id, state in self._previous_state.resource_sync_states.items()
+                    ],
+                )
         except OSError:
             LOG.debug("Missing previous sync state, will create a new file at the end of this execution")
+
+    @staticmethod
+    def _sync_state_from_rows(
+        dependency_layer: bool,
+        latest_infra_sync_time: Optional[float],
+        resource_rows: list[tuple[str, str, float]],
+    ) -> SyncState:
+        return SyncState(
+            dependency_layer=dependency_layer,
+            resource_sync_states={
+                resource_id: ResourceSyncState(hash_value, datetime.fromtimestamp(sync_time, tz=timezone.utc))
+                for resource_id, hash_value, sync_time in resource_rows
+            },
+            latest_infra_sync_time=datetime.fromtimestamp(latest_infra_sync_time, tz=timezone.utc)
+            if latest_infra_sync_time is not None
+            else None,
+        )
+
+    @staticmethod
+    def _sync_state_from_runtime(runtime_state) -> SyncState:
+        return SyncContext._sync_state_from_rows(
+            runtime_state.dependency_layer,
+            runtime_state.latest_infra_sync_time,
+            list(runtime_state.resource_rows()),
+        )
 
     def _cleanup_build_folders(self) -> None:
         """
