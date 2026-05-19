@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from docker.client import DockerClient
 
 from samcli.lib.build.app_builder import ApplicationBuilder, ApplicationBuildResult
+from samcli.lib.build.rust_backend import function_resource_api_call_rows
 from samcli.lib.package.ecr_uploader import ECRUploader
 from samcli.lib.providers.provider import Stack
 from samcli.lib.sync.flows.function_sync_flow import (
@@ -164,6 +165,18 @@ class ImageFunctionSyncFlow(FunctionSyncFlow):
             )
 
     def _get_resource_api_calls(self) -> List[ResourceAPICall]:
+        native_rows = function_resource_api_call_rows(
+            self._function_identifier,
+            [],
+            None,
+            self.auto_publish_latest_invocable,
+        )
+        if native_rows is not None:
+            return [
+                ResourceAPICall(resource, [ApiCallTypes(api_call) for api_call in api_calls])
+                for resource, api_calls in native_rows
+            ]
+
         # We need to acquire lock for both API calls since they would conflict on cloud
         # Any UPDATE_FUNCTION_CODE and UPDATE_FUNCTION_CONFIGURATION on the same function
         # Cannot take place in parallel

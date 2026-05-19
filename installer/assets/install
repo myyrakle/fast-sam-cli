@@ -69,7 +69,7 @@ set_global_vars() {
   EXE_NAME="fsam"
   INSTALLER_DIR="$( cd "$( dirname "$0" )" >/dev/null 2>&1 && pwd )"
   INSTALLER_DIST_DIR="$INSTALLER_DIR/dist"
-  INSTALLER_EXE="$INSTALLER_DIST_DIR/$EXE_NAME"
+  INSTALLER_EXE="$INSTALLER_DIST_DIR/$EXE_NAME/$EXE_NAME"
   SAM_EXE_VERSION=$($INSTALLER_EXE --version | cut -d ' ' -f 4)
 
   INSTALL_DIR="$ROOT_INSTALL_DIR/$SAM_EXE_VERSION"
@@ -114,7 +114,7 @@ setup_install_dist() {
 
 setup_install_bin() {
   mkdir -p "$INSTALL_BIN_DIR"
-  ln -s "../dist/$EXE_NAME" "$INSTALL_SAM_EXE"
+  ln -s "../dist/$EXE_NAME/$EXE_NAME" "$INSTALL_SAM_EXE"
 }
 
 create_current_symlink() {

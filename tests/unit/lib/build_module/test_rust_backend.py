@@ -485,6 +485,184 @@ class TestRustBackend(TestCase):
             self.assertIsNone(rust_backend.remove_redundant_folders(object(), ["keep"]))
         native.remove_redundant_folders.assert_not_called()
 
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_lambda_zip_with_sha256_returns_native_artifact(self):
+        native = Mock()
+        native.create_lambda_zip_with_sha256.return_value = ("artifact.zip", "sha256")
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.create_lambda_zip_with_sha256(Path("artifact"), Path("src")),
+                ("artifact.zip", "sha256"),
+            )
+        native.create_lambda_zip_with_sha256.assert_called_once_with("artifact", "src")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_lambda_zip_with_sha256_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.create_lambda_zip_with_sha256("artifact", "src"))
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_sha256_file_checksum_returns_native_hash(self):
+        native = Mock()
+        native.sha256_file_checksum.return_value = "sha256"
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.sha256_file_checksum(Path("artifact.zip")), "sha256")
+        native.sha256_file_checksum.assert_called_once_with("artifact.zip")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_sha256_file_checksum_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.sha256_file_checksum("artifact.zip"))
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_write_sync_state_compact_uses_native_module(self):
+        native = Mock()
+        with patch.object(rust_backend, "_native", native):
+            self.assertTrue(
+                rust_backend.write_sync_state_compact("sync.toml", True, 1.0, [("Fn", "hash", 2.0)])
+            )
+        native.write_sync_state_compact.assert_called_once_with("sync.toml", True, 1.0, [("Fn", "hash", 2.0)])
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_read_sync_state_compact_returns_native_rows(self):
+        native = Mock()
+        native.read_sync_state_compact.return_value = (True, 1.0, [("Fn", "hash", 2.0)])
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.read_sync_state_compact("sync.toml"),
+                (True, 1.0, [("Fn", "hash", 2.0)]),
+            )
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_runtime_sync_state_returns_native_handle(self):
+        native = Mock()
+        runtime_state = Mock()
+        native.RuntimeSyncState.return_value = runtime_state
+        with patch.object(rust_backend, "_native", native):
+            self.assertIs(
+                rust_backend.create_runtime_sync_state(True, 1.0, [("Fn", "hash", 2.0)]),
+                runtime_state,
+            )
+        native.RuntimeSyncState.assert_called_once_with(True, 1.0, [("Fn", "hash", 2.0)])
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_read_runtime_sync_state_returns_native_handle(self):
+        native = Mock()
+        runtime_state = Mock()
+        native.read_runtime_sync_state.return_value = runtime_state
+        with patch.object(rust_backend, "_native", native):
+            self.assertIs(rust_backend.read_runtime_sync_state(Path("sync.toml")), runtime_state)
+        native.read_runtime_sync_state.assert_called_once_with("sync.toml")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_runtime_resource_type_index_returns_native_handle(self):
+        native = Mock()
+        runtime_index = Mock()
+        rows = [("", "Fn", "Fn", "AWS::Serverless::Function")]
+        native.RuntimeResourceTypeIndex.return_value = runtime_index
+        with patch.object(rust_backend, "_native", native):
+            self.assertIs(rust_backend.create_runtime_resource_type_index(rows), runtime_index)
+        native.RuntimeResourceTypeIndex.assert_called_once_with(rows)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_dependent_function_ids_returns_native_matches(self):
+        native = Mock()
+        rows = [("FnA", ["LayerA"]), ("FnB", ["LayerB"])]
+        native.dependent_function_ids.return_value = ["FnA"]
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.dependent_function_ids("LayerA", rows), ["FnA"])
+        native.dependent_function_ids.assert_called_once_with("LayerA", rows)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_read_definition_bytes_with_sha256_returns_native_body_and_hash(self):
+        native = Mock()
+        native.read_definition_bytes_with_sha256.return_value = (b"{}", "sha256")
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.read_definition_bytes_with_sha256(Path("openapi.json")), (b"{}", "sha256"))
+        native.read_definition_bytes_with_sha256.assert_called_once_with("openapi.json")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_read_definition_text_with_sha256_returns_native_body_and_hash(self):
+        native = Mock()
+        native.read_definition_text_with_sha256.return_value = ("{}", "sha256")
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.read_definition_text_with_sha256(Path("state.json")), ("{}", "sha256"))
+        native.read_definition_text_with_sha256.assert_called_once_with("state.json")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_function_resource_api_call_rows_returns_native_rows(self):
+        native = Mock()
+        native.function_resource_api_call_rows.return_value = [
+            ("Layer", ["Build"]),
+            ("Function", ["UpdateFunctionCode", "UpdateFunctionConfiguration"]),
+        ]
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.function_resource_api_call_rows("Function", ["Layer"], "CodeUri/", False),
+                [
+                    ("Layer", ["Build"]),
+                    ("Function", ["UpdateFunctionCode", "UpdateFunctionConfiguration"]),
+                ],
+            )
+        native.function_resource_api_call_rows.assert_called_once_with("Function", ["Layer"], "CodeUri/", False)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_lock_keys_from_api_call_rows_returns_native_keys(self):
+        native = Mock()
+        rows = [("Function", ["UpdateFunctionCode", "UpdateFunctionConfiguration"])]
+        native.lock_keys_from_api_call_rows.return_value = [
+            "Function_UpdateFunctionCode",
+            "Function_UpdateFunctionConfiguration",
+        ]
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.lock_keys_from_api_call_rows(rows),
+                {"Function_UpdateFunctionCode", "Function_UpdateFunctionConfiguration"},
+            )
+        native.lock_keys_from_api_call_rows.assert_called_once_with(rows)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_collect_rest_api_stage_names_returns_native_stages(self):
+        native = Mock()
+        stage_rows = [("prod", "Api1", "Deployment1")]
+        native.collect_rest_api_stage_names.return_value = ["beta", "Stage", "prod"]
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.collect_rest_api_stage_names(
+                    "Api1",
+                    "AWS::Serverless::Api",
+                    "beta",
+                    ["Stage"],
+                    stage_rows,
+                    ["Deployment1"],
+                ),
+                {"beta", "Stage", "prod"},
+            )
+        native.collect_rest_api_stage_names.assert_called_once_with(
+            "Api1",
+            "AWS::Serverless::Api",
+            "beta",
+            ["Stage"],
+            stage_rows,
+            ["Deployment1"],
+        )
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_local_hash_matches_returns_native_result(self):
+        native = Mock()
+        native.local_hash_matches.return_value = True
+        with patch.object(rust_backend, "_native", native):
+            self.assertTrue(rust_backend.local_hash_matches("hash", "hash"))
+        native.local_hash_matches.assert_called_once_with("hash", "hash")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_sync_execution_decision_returns_native_plan(self):
+        native = Mock()
+        native.sync_execution_decision.return_value = (True, False)
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.sync_execution_decision(False, None), (True, False))
+        native.sync_execution_decision.assert_called_once_with(False, None)
+
     @patch.dict("os.environ", {rust_backend.RUST_BUILD_CORE_ENV_VAR: "1"}, clear=True)
     def test_read_build_graph_decodes_native_json_when_enabled(self):
         native = Mock()

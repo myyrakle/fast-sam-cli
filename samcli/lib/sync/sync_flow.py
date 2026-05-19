@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Set, ca
 from boto3.session import Session
 
 from samcli.lib.build.app_builder import ApplicationBuildResult
+from samcli.lib.build.rust_backend import local_hash_matches, lock_keys_from_api_call_rows, sync_execution_decision
 from samcli.lib.providers.provider import ResourceIdentifier, Stack, get_resource_by_id
 from samcli.lib.sync.exceptions import MissingLockException, MissingPhysicalResourceError
 from samcli.lib.utils.boto_utils import get_boto_client_provider_from_session_with_config
@@ -165,9 +166,10 @@ class SyncFlow(ABC):
         """
         stored_sha = self._sync_context.get_resource_latest_sync_hash(self.sync_state_identifier)
         LOG.debug("%sLocal SHA: %s Stored SHA: %s", self.log_prefix, self._local_sha, stored_sha)
-        if self._local_sha and stored_sha and self._local_sha == stored_sha:
-            return True
-        return False
+        native_result = local_hash_matches(self._local_sha, stored_sha)
+        if native_result is not None:
+            return native_result
+        return bool(self._local_sha and stored_sha and self._local_sha == stored_sha)
 
     @abstractmethod
     def compare_remote(self) -> bool:
@@ -233,10 +235,20 @@ class SyncFlow(ABC):
         Set[str]
             Set of keys for all resources and their API calls
         """
+        resource_api_calls = self._get_resource_api_calls()
+        native_lock_keys = lock_keys_from_api_call_rows(
+            [
+                (resource_api_call.shared_resource, [api_call.value for api_call in resource_api_call.api_calls])
+                for resource_api_call in resource_api_calls
+            ]
+        )
+        if native_lock_keys is not None:
+            return native_lock_keys
+
         lock_keys = set()
-        for resource_api_calls in self._get_resource_api_calls():
-            for api_call in resource_api_calls.api_calls:
-                lock_keys.add(SyncFlow._get_lock_key(resource_api_calls.shared_resource, api_call))
+        for resource_api_call in resource_api_calls:
+            for api_call in resource_api_call.api_calls:
+                lock_keys.add(SyncFlow._get_lock_key(resource_api_call.shared_resource, api_call))
         return lock_keys
 
     def set_locks_with_distributor(self, distributor: LockDistributor):
@@ -383,8 +395,17 @@ class SyncFlow(ABC):
         self.set_up()
         LOG.debug("%sGathering Resources", self.log_prefix)
         self.gather_resources()
-        LOG.debug("%sComparing with Remote", self.log_prefix)
-        if (not self.compare_local()) and (not self.compare_remote()):
+        local_matches = self.compare_local()
+        decision = sync_execution_decision(local_matches, None)
+        should_compare_remote = not local_matches if decision is None else decision[0]
+        remote_matches = False
+        if should_compare_remote:
+            LOG.debug("%sComparing with Remote", self.log_prefix)
+            remote_matches = self.compare_remote()
+
+        decision = sync_execution_decision(local_matches, remote_matches)
+        should_sync = (not local_matches and not remote_matches) if decision is None else decision[1]
+        if should_sync:
             LOG.debug("%sSyncing", self.log_prefix)
             self.sync()
             LOG.debug("%sUpdating local hash of the sync flow", self.log_prefix)

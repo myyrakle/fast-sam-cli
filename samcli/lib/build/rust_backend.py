@@ -7,7 +7,7 @@ default-on while keeping explicit opt-out and shadow-mode escape hatches.
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 RUST_BUILD_CORE_ENV_VAR = "SAM_CLI_RUST_BUILD_CORE"
 RUST_BUILD_CORE_SHADOW_ENV_VAR = "SAM_CLI_RUST_BUILD_CORE_SHADOW"
@@ -595,3 +595,253 @@ def remove_redundant_folders(base_dir: str, retained_uuids: List[str]) -> Option
         return list(_native.remove_redundant_folders(os.fspath(base_dir), retained_uuids))
     except (OSError, TypeError):
         return None
+
+
+def create_lambda_zip_with_sha256(output_base_path: str, source_root: str) -> Optional[tuple[str, str]]:
+    """Create a deterministic Lambda ZIP and its SHA256 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "create_lambda_zip_with_sha256", None)
+    if native_fn is None:
+        return None
+    try:
+        zip_path, sha256 = native_fn(os.fspath(output_base_path), os.fspath(source_root))
+    except (OSError, TypeError):
+        return None
+    return str(zip_path), str(sha256)
+
+
+def sha256_file_checksum(path: str) -> Optional[str]:
+    """Calculate a file SHA256 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "sha256_file_checksum", None)
+    if native_fn is None:
+        return None
+    try:
+        return str(native_fn(os.fspath(path)))
+    except (OSError, TypeError):
+        return None
+
+
+def write_sync_state_compact(
+    path: str,
+    dependency_layer: bool,
+    latest_infra_sync_time: Optional[float],
+    resource_rows: List[tuple[str, str, float]],
+) -> bool:
+    """Persist compact sync state rows through Rust when enabled."""
+    if not is_enabled():
+        return False
+    native_fn = getattr(_native, "write_sync_state_compact", None)
+    if native_fn is None:
+        return False
+    try:
+        native_fn(os.fspath(path), dependency_layer, latest_infra_sync_time, resource_rows)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def read_sync_state_compact(path: str) -> Optional[tuple[bool, Optional[float], List[tuple[str, str, float]]]]:
+    """Read compact sync state rows through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "read_sync_state_compact", None)
+    if native_fn is None:
+        return None
+    try:
+        result = native_fn(os.fspath(path))
+    except (OSError, TypeError):
+        return None
+    if result is None:
+        return None
+    dependency_layer, latest_infra_sync_time, resource_rows = result
+    return bool(dependency_layer), latest_infra_sync_time, list(resource_rows)
+
+
+def create_runtime_sync_state(
+    dependency_layer: bool,
+    latest_infra_sync_time: Optional[float],
+    resource_rows: List[tuple[str, str, float]],
+) -> Optional[Any]:
+    """Create a Rust-owned mutable sync state when enabled."""
+    if not is_enabled():
+        return None
+    native_cls = getattr(_native, "RuntimeSyncState", None)
+    if native_cls is None:
+        return None
+    try:
+        return native_cls(dependency_layer, latest_infra_sync_time, resource_rows)
+    except TypeError:
+        return None
+
+
+def read_runtime_sync_state(path: str) -> Optional[Any]:
+    """Read sync state into a Rust-owned mutable state handle when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "read_runtime_sync_state", None)
+    if native_fn is None:
+        return None
+    try:
+        return native_fn(os.fspath(path))
+    except (OSError, TypeError):
+        return None
+
+
+def create_runtime_resource_type_index(
+    rows: List[tuple[str, str, str, Optional[str]]],
+) -> Optional[Any]:
+    """Create a Rust-owned resource type lookup index when enabled."""
+    if not is_enabled():
+        return None
+    native_cls = getattr(_native, "RuntimeResourceTypeIndex", None)
+    if native_cls is None:
+        return None
+    try:
+        return native_cls(rows)
+    except TypeError:
+        return None
+
+
+def dependent_function_ids(
+    layer_identifier: str,
+    function_layer_rows: List[tuple[str, List[str]]],
+) -> Optional[List[str]]:
+    """Filter function identifiers that depend on a layer through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "dependent_function_ids", None)
+    if native_fn is None:
+        return None
+    try:
+        return list(native_fn(layer_identifier, function_layer_rows))
+    except TypeError:
+        return None
+
+
+def read_definition_bytes_with_sha256(path: str) -> Optional[tuple[bytes, str]]:
+    """Read a UTF-8 definition file as bytes and calculate SHA256 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "read_definition_bytes_with_sha256", None)
+    if native_fn is None:
+        return None
+    try:
+        body, sha256 = native_fn(os.fspath(path))
+    except (OSError, TypeError):
+        return None
+    return bytes(body), str(sha256)
+
+
+def read_definition_text_with_sha256(path: str) -> Optional[tuple[str, str]]:
+    """Read a UTF-8 definition file as text and calculate SHA256 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "read_definition_text_with_sha256", None)
+    if native_fn is None:
+        return None
+    try:
+        text, sha256 = native_fn(os.fspath(path))
+    except (OSError, TypeError):
+        return None
+    return str(text), str(sha256)
+
+
+def function_resource_api_call_rows(
+    function_identifier: str,
+    layer_ids: List[str],
+    codeuri: Optional[str],
+    auto_publish_latest_invocable: bool,
+) -> Optional[List[tuple[str, List[str]]]]:
+    """Create function resource/API-call rows through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "function_resource_api_call_rows", None)
+    if native_fn is None:
+        return None
+    try:
+        rows = native_fn(function_identifier, layer_ids, codeuri, auto_publish_latest_invocable)
+    except TypeError:
+        return None
+    return [(str(resource), [str(api_call) for api_call in api_calls]) for resource, api_calls in rows]
+
+
+def lock_keys_from_api_call_rows(
+    resource_api_call_rows: List[tuple[str, List[str]]],
+) -> Optional[Set[str]]:
+    """Create sync lock keys through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "lock_keys_from_api_call_rows", None)
+    if native_fn is None:
+        return None
+    try:
+        return {str(lock_key) for lock_key in native_fn(resource_api_call_rows)}
+    except TypeError:
+        return None
+
+
+def collect_rest_api_stage_names(
+    api_identifier: str,
+    api_resource_type: Optional[str],
+    api_stage_name: Optional[str],
+    remote_stage_names: List[str],
+    stage_rows: List[tuple[Optional[str], Optional[str], Optional[str]]],
+    deployment_resource_ids: List[str],
+) -> Optional[Set[str]]:
+    """Collect RestApi stages to update through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "collect_rest_api_stage_names", None)
+    if native_fn is None:
+        return None
+    try:
+        return {
+            str(stage_name)
+            for stage_name in native_fn(
+                api_identifier,
+                api_resource_type,
+                api_stage_name,
+                remote_stage_names,
+                stage_rows,
+                deployment_resource_ids,
+            )
+        }
+    except TypeError:
+        return None
+
+
+def local_hash_matches(local_hash: Optional[str], stored_hash: Optional[str]) -> Optional[bool]:
+    """Compare local and stored sync hashes through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "local_hash_matches", None)
+    if native_fn is None:
+        return None
+    try:
+        return bool(native_fn(local_hash, stored_hash))
+    except TypeError:
+        return None
+
+
+def sync_execution_decision(
+    local_matches: bool,
+    remote_matches: Optional[bool],
+) -> Optional[tuple[bool, bool]]:
+    """Plan SyncFlow execute branching through Rust when enabled.
+
+    Returns:
+        Tuple of (should_compare_remote, should_sync), or None when unavailable.
+    """
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "sync_execution_decision", None)
+    if native_fn is None:
+        return None
+    try:
+        compare_remote, sync = native_fn(local_matches, remote_matches)
+    except TypeError:
+        return None
+    return bool(compare_remote), bool(sync)

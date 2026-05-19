@@ -6,6 +6,7 @@ from abc import ABC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
+from samcli.lib.build.rust_backend import read_definition_bytes_with_sha256
 from samcli.lib.providers.provider import ResourceIdentifier, Stack, get_resource_by_id
 from samcli.lib.sync.sync_flow import ResourceAPICall, SyncFlow, get_definition_path
 from samcli.lib.utils.hash import str_checksum
@@ -79,6 +80,13 @@ class GenericApiSyncFlow(SyncFlow, ABC):
 
     def gather_resources(self) -> None:
         self._definition_uri = self._get_definition_file(self._api_identifier)
+        native_definition = (
+            read_definition_bytes_with_sha256(self._definition_uri) if self._definition_uri is not None else None
+        )
+        if native_definition is not None:
+            self._swagger_body, self._local_sha = native_definition
+            return
+
         self._swagger_body = self._process_definition_file()
         if self._swagger_body:
             self._local_sha = str_checksum(self._swagger_body.decode("utf-8"), hashlib.sha256())

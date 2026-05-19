@@ -9,8 +9,10 @@ from samcli.commands.build.build_context import BuildContext
 from samcli.commands.exceptions import InvalidStackNameException
 from samcli.lib.bootstrap.nested_stack.nested_stack_manager import NestedStackManager
 from samcli.lib.build.app_builder import ApplicationBuildResult
+from samcli.lib.build.rust_backend import create_runtime_resource_type_index
 from samcli.lib.package.utils import is_local_folder, is_zip_file
 from samcli.lib.providers.provider import Function, FunctionBuildInfo, ResourceIdentifier, Stack
+from samcli.lib.samlib.resource_metadata_normalizer import ResourceMetadataNormalizer
 from samcli.lib.sync.flows.auto_dependency_layer_sync_flow import AutoDependencyLayerParentSyncFlow
 from samcli.lib.sync.flows.function_sync_flow import FunctionSyncFlow
 from samcli.lib.sync.flows.http_api_sync_flow import HttpApiSyncFlow
@@ -95,6 +97,7 @@ class SyncFlowFactory(ResourceTypeBasedFactory[SyncFlow]):  # pylint: disable=E1
     _sync_context: "SyncContext"
     _physical_id_mapping: Dict[str, str]
     _auto_dependency_layer: bool
+    _resource_type_index: Optional[object]
 
     def __init__(
         self,
@@ -122,6 +125,31 @@ class SyncFlowFactory(ResourceTypeBasedFactory[SyncFlow]):  # pylint: disable=E1
         self._sync_context = sync_context
         self._auto_dependency_layer = auto_dependency_layer
         self._physical_id_mapping = dict()
+        self._resource_type_index = self._create_resource_type_index(stacks)
+
+    @staticmethod
+    def _create_resource_type_index(stacks: List[Stack]) -> Optional[object]:
+        rows = []
+        for stack in stacks:
+            for logical_id, resource in stack.resources.items():
+                resource_id = ResourceMetadataNormalizer.get_resource_id(resource, logical_id)
+                resource_type = resource.get("Type", None)
+                rows.append(
+                    (
+                        stack.stack_path,
+                        logical_id,
+                        resource_id,
+                        resource_type if isinstance(resource_type, str) else None,
+                    )
+                )
+        return create_runtime_resource_type_index(rows)
+
+    def _get_resource_type(self, resource_identifier: ResourceIdentifier) -> Optional[str]:
+        if self._resource_type_index is not None:
+            resource_type = self._resource_type_index.get_resource_type(str(resource_identifier))
+            if resource_type:
+                return resource_type
+        return super()._get_resource_type(resource_identifier)
 
     def load_physical_id_mapping(self) -> None:
         """Load physical IDs of the stack resources from remote"""

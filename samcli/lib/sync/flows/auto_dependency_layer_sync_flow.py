@@ -13,6 +13,7 @@ from samcli.lib.bootstrap.nested_stack.nested_stack_builder import NestedStackBu
 from samcli.lib.bootstrap.nested_stack.nested_stack_manager import NestedStackManager
 from samcli.lib.build.app_builder import ApplicationBuildResult
 from samcli.lib.build.build_graph import BuildGraph
+from samcli.lib.build.rust_backend import create_lambda_zip_with_sha256
 from samcli.lib.package.utils import make_zip_with_lambda_permissions
 from samcli.lib.providers.provider import Function, Stack
 from samcli.lib.providers.sam_function_provider import SamFunctionProvider
@@ -92,8 +93,12 @@ class AutoDependencyLayerSyncFlow(AbstractLayerSyncFlow):
             self._get_compatible_runtimes()[0],
         )
         zip_file_path = os.path.join(tempfile.gettempdir(), "data-" + uuid.uuid4().hex)
-        self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
-        self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
+        rust_artifact = create_lambda_zip_with_sha256(zip_file_path, cast(str, self._artifact_folder))
+        if rust_artifact is not None:
+            self._zip_file, self._local_sha = rust_artifact
+        else:
+            self._zip_file = make_zip_with_lambda_permissions(zip_file_path, self._artifact_folder)
+            self._local_sha = file_checksum(cast(str, self._zip_file), hashlib.sha256())
 
     def _get_dependent_functions(self) -> List[Function]:
         function = SamFunctionProvider(cast(List[Stack], self._stacks)).get(self._function_identifier)
