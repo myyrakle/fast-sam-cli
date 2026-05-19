@@ -1,5 +1,9 @@
+import os
+import shutil
 import tempfile
+import zipfile
 from unittest import TestCase
+from unittest.mock import patch
 
 from parameterized import parameterized
 
@@ -48,6 +52,45 @@ class TestPackageUtils(TestCase):
     )
     def test_is_not_s3_url(self, url):
         self.assertFalse(utils.is_s3_url(url))
+
+
+    @patch("samcli.lib.package.utils.create_package_zip")
+    def test_make_zip_uses_native_package_zip_when_available(self, create_package_zip_mock):
+        create_package_zip_mock.return_value = "/tmp/native.zip"
+
+        self.assertEqual(utils.make_zip("/tmp/native", "/tmp/source"), "/tmp/native.zip")
+
+        create_package_zip_mock.assert_called_once_with("/tmp/native", "/tmp/source", False)
+
+    @patch("samcli.lib.package.utils.create_package_zip")
+    def test_make_zip_falls_back_when_native_package_zip_is_unavailable(self, create_package_zip_mock):
+        create_package_zip_mock.return_value = None
+        tmp_folder = tempfile.mkdtemp()
+        with open(os.path.join(tmp_folder, "index.js"), "w", encoding="utf-8") as file_handle:
+            file_handle.write("exports.handler = () => {};" )
+
+        zip_file = utils.make_zip(os.path.join(tmp_folder, "artifact"), tmp_folder)
+        try:
+            self.assertTrue(zipfile.is_zipfile(zip_file))
+        finally:
+            os.remove(zip_file)
+            shutil.rmtree(tmp_folder, ignore_errors=True)
+
+    @patch("samcli.lib.package.utils.platform.system")
+    @patch("samcli.lib.package.utils.create_package_zip")
+    def test_make_zip_skips_native_package_zip_on_windows(self, create_package_zip_mock, system_mock):
+        system_mock.return_value = "Windows"
+        tmp_folder = tempfile.mkdtemp()
+        with open(os.path.join(tmp_folder, "index.js"), "w", encoding="utf-8") as file_handle:
+            file_handle.write("exports.handler = () => {};" )
+
+        zip_file = utils.make_zip(os.path.join(tmp_folder, "artifact"), tmp_folder)
+        try:
+            self.assertTrue(zipfile.is_zipfile(zip_file))
+            create_package_zip_mock.assert_not_called()
+        finally:
+            os.remove(zip_file)
+            shutil.rmtree(tmp_folder, ignore_errors=True)
 
     def test_zip_folder_uses_different_path_for_same_file_in_different_run(self):
         all_zip_files = set()

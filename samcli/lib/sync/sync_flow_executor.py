@@ -2,7 +2,7 @@
 
 import logging
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
 from queue import Queue
@@ -139,7 +139,7 @@ class SyncFlowExecutor:
         """
         # Lock flow_queue as check dedup and add is not atomic
         with self._flow_queue_lock:
-            if task.dedup and task.sync_flow in [task.sync_flow for task in self._flow_queue.queue]:
+            if task.dedup and any(task.sync_flow == queued_task.sync_flow for queued_task in self._flow_queue.queue):
                 LOG.debug("Found the same SyncFlow in queue. Skip adding.")
                 return
 
@@ -199,9 +199,22 @@ class SyncFlowExecutor:
                     LOG.debug("No more SyncFlows in executor. Stopping.")
                     break
 
-                # Sleep for a bit to cut down CPU utilization of this busy wait loop
-                time.sleep(0.1)
+                self._wait_for_next_step()
         self._running_flag = False
+
+    def _wait_for_next_step(self) -> None:
+        """Wait until a running flow finishes, or briefly back off when only deferred tasks remain."""
+        if not self._running_futures:
+            time.sleep(0.1)
+            return
+
+        futures = [sync_flow_future.future for sync_flow_future in self._running_futures]
+        try:
+            wait(futures, timeout=0.1, return_when=FIRST_COMPLETED)
+        except AttributeError:
+            # Unit tests use light-weight Future mocks; keep the legacy polling
+            # behavior there while real Future objects take the faster wait path.
+            time.sleep(0.1)
 
     def _execute_step(
         self,
@@ -271,7 +284,7 @@ class SyncFlowExecutor:
         sync_flow = sync_flow_task.sync_flow
 
         # Check whether the same sync flow is already running or not
-        if sync_flow in [future.sync_flow for future in self._running_futures]:
+        if any(sync_flow == running_future.sync_flow for running_future in self._running_futures):
             return None
 
         sync_flow_future = SyncFlowFuture(

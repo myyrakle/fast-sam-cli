@@ -6,6 +6,7 @@ import contextlib
 import functools
 import logging
 import os
+import platform
 import re
 import shutil
 import tempfile
@@ -25,6 +26,7 @@ from samcli.lib.package.permissions import (
     WindowsFilePermissionPermissionMapper,
 )
 from samcli.lib.package.s3_uploader import S3Uploader
+from samcli.lib.build.rust_backend import create_package_zip
 from samcli.lib.utils.hash import dir_checksum
 from samcli.lib.utils.resources import LAMBDA_LOCAL_RESOURCES
 from samcli.lib.utils.s3 import parse_s3_url
@@ -256,6 +258,23 @@ def zip_folder(folder_path, zip_method):
             os.remove(zipfile_name)
 
 
+def _native_package_zip_mode(permission_mappers: List[PermissionMapper]) -> Optional[bool]:
+    if platform.system().lower() == "windows":
+        return None
+
+    mapper_names = [type(mapper).__name__ for mapper in permission_mappers or []]
+    if mapper_names == ["WindowsFilePermissionPermissionMapper", "WindowsDirPermissionPermissionMapper"]:
+        return False
+    if mapper_names == [
+        "WindowsFilePermissionPermissionMapper",
+        "WindowsDirPermissionPermissionMapper",
+        "AdditiveFilePermissionPermissionMapper",
+        "AdditiveDirPermissionPermissionMapper",
+    ]:
+        return True
+    return None
+
+
 def make_zip_with_permissions(file_name, source_root, permission_mappers: List[PermissionMapper]):
     """
     Create a zip file from the source directory
@@ -275,6 +294,12 @@ def make_zip_with_permissions(file_name, source_root, permission_mappers: List[P
         The name of the zip file, including .zip extension
     """
     permission_mappers = permission_mappers or []
+    native_lambda_permissions = _native_package_zip_mode(permission_mappers)
+    if native_lambda_permissions is not None:
+        native_zipfile_name = create_package_zip(file_name, source_root, native_lambda_permissions)
+        if native_zipfile_name is not None:
+            return native_zipfile_name
+
     zipfile_name = "{0}.zip".format(file_name)
     source_root = os.path.abspath(source_root)
     compression_type = zipfile.ZIP_DEFLATED

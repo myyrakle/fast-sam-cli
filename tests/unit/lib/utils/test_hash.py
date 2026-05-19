@@ -6,7 +6,7 @@ import tempfile
 from unittest import TestCase
 from unittest.mock import patch
 
-from samcli.lib.utils.hash import dir_checksum, str_checksum
+from samcli.lib.utils.hash import dir_checksum, file_checksum, str_checksum
 
 
 class TestHash(TestCase):
@@ -119,6 +119,18 @@ class TestHash(TestCase):
         with self.assertRaises(OSError) as ex:
             dir_checksum(os.path.dirname(_file.name))
             self.assertIn("Too many levels of symbolic links", ex.message)
+
+    @patch("samcli.lib.build.rust_backend.md5_file_checksum")
+    def test_file_hash_uses_native_default_md5_when_available(self, patched_native):
+        patched_native.return_value = "native-md5"
+        self.assertEqual(file_checksum(os.path.join(self.temp_dir, "missing")), "native-md5")
+        patched_native.assert_called_once_with(os.path.join(self.temp_dir, "missing"))
+
+    @patch("samcli.lib.build.rust_backend.md5_dir_checksum")
+    def test_dir_hash_uses_native_default_md5_when_available(self, patched_native):
+        patched_native.return_value = "native-md5"
+        self.assertEqual(dir_checksum(self.temp_dir, ignore_list=[".aws-sam"]), "native-md5")
+        patched_native.assert_called_once_with(self.temp_dir, [".aws-sam"])
 
     def test_str_checksum(self):
         checksum = str_checksum("Hello, World!")

@@ -3,17 +3,23 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyList};
 use sam_build_core::{
     batch_plan_builds as core_batch_plan_builds, clean_redundant_folders,
-    collect_rest_api_stage_names as core_collect_rest_api_stage_names, dir_checksum,
+    collect_rest_api_stage_names as core_collect_rest_api_stage_names,
     create_lambda_zip_with_sha256 as core_create_lambda_zip_with_sha256,
-    dependent_function_ids as core_dependent_function_ids,
+    create_package_zip as core_create_package_zip,
+    dependent_function_ids as core_dependent_function_ids, dir_checksum,
+    file_checksum as core_file_checksum,
     function_resource_api_call_rows as core_function_resource_api_call_rows,
-    local_hash_matches as core_local_hash_matches, lock_keys_from_api_call_rows as core_lock_keys_from_api_call_rows,
-    plan_build as core_plan_build, sync_execution_decision as core_sync_execution_decision,
-    file_checksum as core_file_checksum, read_definition_bytes_with_sha256 as core_read_definition_bytes_with_sha256,
-    read_definition_text_with_sha256 as core_read_definition_text_with_sha256, read_sync_state as core_read_sync_state,
-    write_sync_state as core_write_sync_state, BatchPlanInput, BuildGraph as CoreBuildGraph, HashAlgorithm,
-    HashUpdate, ResourceSyncStateSection, ResourceTypeIndex as CoreResourceTypeIndex, ResourceTypeRow,
-    SyncStateDocument, SyncStateSection,
+    local_hash_matches as core_local_hash_matches,
+    lock_keys_from_api_call_rows as core_lock_keys_from_api_call_rows,
+    plan_build as core_plan_build,
+    read_definition_bytes_with_sha256 as core_read_definition_bytes_with_sha256,
+    read_definition_text_with_sha256 as core_read_definition_text_with_sha256,
+    read_sync_state as core_read_sync_state,
+    sync_execution_decision as core_sync_execution_decision,
+    write_sync_state as core_write_sync_state, BatchPlanInput, BuildGraph as CoreBuildGraph,
+    HashAlgorithm, HashUpdate, ResourceSyncStateSection,
+    ResourceTypeIndex as CoreResourceTypeIndex, ResourceTypeRow, SyncStateDocument,
+    SyncStateSection,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
@@ -1070,7 +1076,8 @@ fn json_repr(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<String> {
     let kwargs = PyDict::new(py);
     kwargs.set_item("sort_keys", true)?;
     kwargs.set_item("separators", (",", ":"))?;
-    json.call_method("dumps", (value,), Some(&kwargs))?.extract()
+    json.call_method("dumps", (value,), Some(&kwargs))?
+        .extract()
 }
 
 fn current_function_rows_from_resources(
@@ -1099,9 +1106,9 @@ fn current_function_rows_from_resources(
                 }
             }
             let full_path: String = function.getattr("full_path")?.extract()?;
-            let env_vars = function_env_vars
-                .get_item(&full_path)?
-                .ok_or_else(|| PyOSError::new_err(format!("missing env vars for function {full_path}")))?;
+            let env_vars = function_env_vars.get_item(&full_path)?.ok_or_else(|| {
+                PyOSError::new_err(format!("missing env vars for function {full_path}"))
+            })?;
             Ok((
                 function.getattr("runtime")?.extract()?,
                 function.getattr("codeuri")?.extract()?,
@@ -1127,9 +1134,9 @@ fn current_layer_rows_from_resources(
         .map(|layer| {
             let layer = layer.bind(py);
             let full_path: String = layer.getattr("full_path")?.extract()?;
-            let env_vars = layer_env_vars
-                .get_item(&full_path)?
-                .ok_or_else(|| PyOSError::new_err(format!("missing env vars for layer {full_path}")))?;
+            let env_vars = layer_env_vars.get_item(&full_path)?.ok_or_else(|| {
+                PyOSError::new_err(format!("missing env vars for layer {full_path}"))
+            })?;
             let compatible_runtimes = layer.getattr("compatible_runtimes")?;
             Ok((
                 full_path,
@@ -1258,25 +1265,33 @@ fn runtime_graph_plan_from_resource_groups(
 
     let (layer_groups, layer_records) = layer_groups
         .into_iter()
-        .map(|(indexes, uuid, source_hash, manifest_hash)| -> PyResult<_> {
-            let (full_path, codeuri, build_method, compatible_runtimes_repr, architecture, env_vars_repr) =
-                layer_inputs[indexes[0]].clone();
-            Ok((
-                indexes,
-                RuntimeLayerRecord::new(
-                    uuid.unwrap_or_default(),
-                    source_hash,
-                    manifest_hash,
+        .map(
+            |(indexes, uuid, source_hash, manifest_hash)| -> PyResult<_> {
+                let (
                     full_path,
                     codeuri,
                     build_method,
-                    serde_json::from_str(&compatible_runtimes_repr)
-                        .map_err(|error| PyOSError::new_err(error.to_string()))?,
+                    compatible_runtimes_repr,
                     architecture,
                     env_vars_repr,
-                ),
-            ))
-        })
+                ) = layer_inputs[indexes[0]].clone();
+                Ok((
+                    indexes,
+                    RuntimeLayerRecord::new(
+                        uuid.unwrap_or_default(),
+                        source_hash,
+                        manifest_hash,
+                        full_path,
+                        codeuri,
+                        build_method,
+                        serde_json::from_str(&compatible_runtimes_repr)
+                            .map_err(|error| PyOSError::new_err(error.to_string()))?,
+                        architecture,
+                        env_vars_repr,
+                    ),
+                ))
+            },
+        )
         .collect::<PyResult<Vec<_>>>()?
         .into_iter()
         .unzip();
@@ -2114,7 +2129,21 @@ fn remove_redundant_folders(base_dir: &str, retained_uuids: Vec<String>) -> PyRe
 }
 
 #[pyfunction]
-fn create_lambda_zip_with_sha256(output_base_path: &str, source_root: &str) -> PyResult<(String, String)> {
+fn create_package_zip(
+    output_base_path: &str,
+    source_root: &str,
+    lambda_permissions: bool,
+) -> PyResult<String> {
+    let zip_path = core_create_package_zip(output_base_path, source_root, lambda_permissions)
+        .map_err(|error| PyOSError::new_err(error.to_string()))?;
+    Ok(zip_path.to_string_lossy().into_owned())
+}
+
+#[pyfunction]
+fn create_lambda_zip_with_sha256(
+    output_base_path: &str,
+    source_root: &str,
+) -> PyResult<(String, String)> {
     let (zip_path, sha256) = core_create_lambda_zip_with_sha256(output_base_path, source_root)
         .map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok((zip_path.to_string_lossy().into_owned(), sha256))
@@ -2122,7 +2151,14 @@ fn create_lambda_zip_with_sha256(output_base_path: &str, source_root: &str) -> P
 
 #[pyfunction]
 fn sha256_file_checksum(path: &str) -> PyResult<String> {
-    core_file_checksum(path, HashAlgorithm::Sha256).map_err(|error| PyOSError::new_err(error.to_string()))
+    core_file_checksum(path, HashAlgorithm::Sha256)
+        .map_err(|error| PyOSError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn md5_file_checksum(path: &str) -> PyResult<String> {
+    core_file_checksum(path, HashAlgorithm::Md5)
+        .map_err(|error| PyOSError::new_err(error.to_string()))
 }
 
 #[pyfunction]
@@ -2152,8 +2188,11 @@ fn write_sync_state_compact(
 }
 
 #[pyfunction]
-fn read_sync_state_compact(path: &str) -> PyResult<Option<(bool, Option<f64>, Vec<(String, String, f64)>)>> {
-    let state = core_read_sync_state(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
+fn read_sync_state_compact(
+    path: &str,
+) -> PyResult<Option<(bool, Option<f64>, Vec<(String, String, f64)>)>> {
+    let state =
+        core_read_sync_state(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok(state.map(|state| {
         (
             state.dependency_layer,
@@ -2237,7 +2276,8 @@ impl RuntimeSyncState {
     }
 
     fn update_resource_sync_state(&mut self, resource_id: String, hash: String, sync_time: f64) {
-        self.resource_sync_states.insert(resource_id, (hash, sync_time));
+        self.resource_sync_states
+            .insert(resource_id, (hash, sync_time));
     }
 
     fn update_infra_sync_time(&mut self, sync_time: f64) {
@@ -2245,13 +2285,15 @@ impl RuntimeSyncState {
     }
 
     fn write(&self, path: &str) -> PyResult<()> {
-        core_write_sync_state(path, &self.document()).map_err(|error| PyOSError::new_err(error.to_string()))
+        core_write_sync_state(path, &self.document())
+            .map_err(|error| PyOSError::new_err(error.to_string()))
     }
 }
 
 #[pyfunction]
 fn read_runtime_sync_state(path: &str) -> PyResult<Option<RuntimeSyncState>> {
-    let state = core_read_sync_state(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
+    let state =
+        core_read_sync_state(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok(state.map(|state| RuntimeSyncState {
         dependency_layer: state.dependency_layer,
         latest_infra_sync_time: state.latest_infra_sync_time,
@@ -2276,12 +2318,14 @@ impl RuntimeResourceTypeIndex {
         Self {
             index: CoreResourceTypeIndex::new(
                 rows.into_iter()
-                    .map(|(stack_path, logical_id, resource_id, resource_type)| ResourceTypeRow {
-                        stack_path,
-                        logical_id,
-                        resource_id,
-                        resource_type,
-                    })
+                    .map(
+                        |(stack_path, logical_id, resource_id, resource_type)| ResourceTypeRow {
+                            stack_path,
+                            logical_id,
+                            resource_id,
+                            resource_type,
+                        },
+                    )
                     .collect(),
             ),
         }
@@ -2293,21 +2337,24 @@ impl RuntimeResourceTypeIndex {
 }
 
 #[pyfunction]
-fn dependent_function_ids(layer_identifier: &str, function_layer_rows: Vec<(String, Vec<String>)>) -> Vec<String> {
+fn dependent_function_ids(
+    layer_identifier: &str,
+    function_layer_rows: Vec<(String, Vec<String>)>,
+) -> Vec<String> {
     core_dependent_function_ids(layer_identifier, function_layer_rows)
 }
 
 #[pyfunction]
 fn read_definition_bytes_with_sha256(path: &str) -> PyResult<(Vec<u8>, String)> {
-    let definition =
-        core_read_definition_bytes_with_sha256(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
+    let definition = core_read_definition_bytes_with_sha256(path)
+        .map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok((definition.bytes, definition.sha256))
 }
 
 #[pyfunction]
 fn read_definition_text_with_sha256(path: &str) -> PyResult<(String, String)> {
-    let definition =
-        core_read_definition_text_with_sha256(path).map_err(|error| PyOSError::new_err(error.to_string()))?;
+    let definition = core_read_definition_text_with_sha256(path)
+        .map_err(|error| PyOSError::new_err(error.to_string()))?;
     Ok((definition.text, definition.sha256))
 }
 
@@ -2318,7 +2365,12 @@ fn function_resource_api_call_rows(
     codeuri: Option<String>,
     auto_publish_latest_invocable: bool,
 ) -> Vec<(String, Vec<String>)> {
-    core_function_resource_api_call_rows(function_identifier, layer_ids, codeuri, auto_publish_latest_invocable)
+    core_function_resource_api_call_rows(
+        function_identifier,
+        layer_ids,
+        codeuri,
+        auto_publish_latest_invocable,
+    )
 }
 
 #[pyfunction]
@@ -2377,10 +2429,19 @@ fn _sam_build_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(plan_graph_groups, module)?)?;
     module.add_function(wrap_pyfunction!(plan_graph_groups_from_resources, module)?)?;
     module.add_function(wrap_pyfunction!(reconcile_graph_groups, module)?)?;
-    module.add_function(wrap_pyfunction!(reconcile_graph_groups_from_resources, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        reconcile_graph_groups_from_resources,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(reconcile_graph_plan, module)?)?;
-    module.add_function(wrap_pyfunction!(reconcile_graph_plan_from_resources, module)?)?;
-    module.add_function(wrap_pyfunction!(runtime_graph_plan_from_resource_groups, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        reconcile_graph_plan_from_resources,
+        module
+    )?)?;
+    module.add_function(wrap_pyfunction!(
+        runtime_graph_plan_from_resource_groups,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(compare_definition_hashes, module)?)?;
     module.add_function(wrap_pyfunction!(write_hash_updates, module)?)?;
     module.add_function(wrap_pyfunction!(read_build_graph, module)?)?;
@@ -2388,8 +2449,10 @@ fn _sam_build_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_build_graph, module)?)?;
     module.add_function(wrap_pyfunction!(write_build_graph_compact, module)?)?;
     module.add_function(wrap_pyfunction!(remove_redundant_folders, module)?)?;
+    module.add_function(wrap_pyfunction!(create_package_zip, module)?)?;
     module.add_function(wrap_pyfunction!(create_lambda_zip_with_sha256, module)?)?;
     module.add_function(wrap_pyfunction!(sha256_file_checksum, module)?)?;
+    module.add_function(wrap_pyfunction!(md5_file_checksum, module)?)?;
     module.add_function(wrap_pyfunction!(write_sync_state_compact, module)?)?;
     module.add_function(wrap_pyfunction!(read_sync_state_compact, module)?)?;
     module.add_function(wrap_pyfunction!(read_runtime_sync_state, module)?)?;

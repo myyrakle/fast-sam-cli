@@ -17,7 +17,8 @@ pub struct DefinitionText {
 
 pub fn read_definition_bytes_with_sha256(path: impl AsRef<Path>) -> io::Result<DefinitionBytes> {
     let bytes = fs::read(path)?;
-    let text = String::from_utf8(bytes.clone()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let text = String::from_utf8(bytes.clone())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let sha256 = sha256_hex(text.as_bytes());
     Ok(DefinitionBytes { bytes, sha256 })
 }

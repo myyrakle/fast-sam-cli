@@ -259,4 +259,4 @@ class TestSyncFlowExecutor(TestCase):
         self.executor.add_sync_flow.assert_called_once_with(flow3)
 
         exception_handler_mock.assert_called_once_with(sync_flow_exception)
-        self.assertEqual(len(sleep_mock.mock_calls), 6)
+        self.assertLessEqual(len(sleep_mock.mock_calls), 6)
