@@ -507,6 +507,22 @@ class TestRustBackend(TestCase):
             self.assertIsNone(rust_backend.create_package_zip("artifact", "src", False))
 
     @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_with_md5_returns_native_artifact(self):
+        native = Mock()
+        native.create_package_zip_with_md5.return_value = ("artifact.zip", "md5")
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.create_package_zip_with_md5(Path("artifact"), Path("src"), True),
+                ("artifact.zip", "md5"),
+            )
+        native.create_package_zip_with_md5.assert_called_once_with("artifact", "src", True)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_with_md5_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.create_package_zip_with_md5("artifact", "src", False))
+
+    @patch.dict("os.environ", {}, clear=True)
     def test_create_lambda_zip_with_sha256_returns_native_artifact(self):
         native = Mock()
         native.create_lambda_zip_with_sha256.return_value = ("artifact.zip", "sha256")

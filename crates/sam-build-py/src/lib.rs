@@ -5,7 +5,7 @@ use sam_build_core::{
     batch_plan_builds as core_batch_plan_builds, clean_redundant_folders,
     collect_rest_api_stage_names as core_collect_rest_api_stage_names,
     create_lambda_zip_with_sha256 as core_create_lambda_zip_with_sha256,
-    create_package_zip as core_create_package_zip,
+    create_package_zip as core_create_package_zip, create_package_zip_with_md5 as core_create_package_zip_with_md5,
     dependent_function_ids as core_dependent_function_ids, dir_checksum,
     file_checksum as core_file_checksum,
     function_resource_api_call_rows as core_function_resource_api_call_rows,
@@ -2140,6 +2140,17 @@ fn create_package_zip(
 }
 
 #[pyfunction]
+fn create_package_zip_with_md5(
+    output_base_path: &str,
+    source_root: &str,
+    lambda_permissions: bool,
+) -> PyResult<(String, String)> {
+    let (zip_path, md5) = core_create_package_zip_with_md5(output_base_path, source_root, lambda_permissions)
+        .map_err(|error| PyOSError::new_err(error.to_string()))?;
+    Ok((zip_path.to_string_lossy().into_owned(), md5))
+}
+
+#[pyfunction]
 fn create_lambda_zip_with_sha256(
     output_base_path: &str,
     source_root: &str,
@@ -2450,6 +2461,7 @@ fn _sam_build_core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(write_build_graph_compact, module)?)?;
     module.add_function(wrap_pyfunction!(remove_redundant_folders, module)?)?;
     module.add_function(wrap_pyfunction!(create_package_zip, module)?)?;
+    module.add_function(wrap_pyfunction!(create_package_zip_with_md5, module)?)?;
     module.add_function(wrap_pyfunction!(create_lambda_zip_with_sha256, module)?)?;
     module.add_function(wrap_pyfunction!(sha256_file_checksum, module)?)?;
     module.add_function(wrap_pyfunction!(md5_file_checksum, module)?)?;

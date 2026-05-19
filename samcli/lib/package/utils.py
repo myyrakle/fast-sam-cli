@@ -26,7 +26,7 @@ from samcli.lib.package.permissions import (
     WindowsFilePermissionPermissionMapper,
 )
 from samcli.lib.package.s3_uploader import S3Uploader
-from samcli.lib.build.rust_backend import create_package_zip
+from samcli.lib.build.rust_backend import create_package_zip, create_package_zip_with_md5
 from samcli.lib.utils.hash import dir_checksum
 from samcli.lib.utils.resources import LAMBDA_LOCAL_RESOURCES
 from samcli.lib.utils.s3 import parse_s3_url
@@ -247,6 +247,19 @@ def zip_folder(folder_path, zip_method):
     md5hash : str
         The md5 hash of the directory
     """
+    native_lambda_permissions = _native_package_zip_mode_from_zip_method(zip_method)
+    if native_lambda_permissions is not None:
+        native_filename = os.path.join(tempfile.mkdtemp(), "data")
+        native_zip_result = create_package_zip_with_md5(native_filename, folder_path, native_lambda_permissions)
+        if native_zip_result is not None:
+            zipfile_name, md5hash = native_zip_result
+            try:
+                yield zipfile_name, md5hash
+            finally:
+                if os.path.exists(zipfile_name):
+                    os.remove(zipfile_name)
+            return
+
     md5hash = dir_checksum(folder_path, followlinks=True)
     filename = os.path.join(tempfile.mkdtemp(), "data-" + md5hash)
 
@@ -273,6 +286,12 @@ def _native_package_zip_mode(permission_mappers: List[PermissionMapper]) -> Opti
     ]:
         return True
     return None
+
+
+def _native_package_zip_mode_from_zip_method(zip_method: Callable) -> Optional[bool]:
+    if getattr(zip_method, "func", None) is not make_zip_with_permissions:
+        return None
+    return _native_package_zip_mode(getattr(zip_method, "keywords", {}).get("permission_mappers", []))
 
 
 def make_zip_with_permissions(file_name, source_root, permission_mappers: List[PermissionMapper]):

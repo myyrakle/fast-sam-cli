@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import zipfile
 from unittest import TestCase
+from unittest import mock
 from unittest.mock import patch
 
 from parameterized import parameterized
@@ -91,6 +92,38 @@ class TestPackageUtils(TestCase):
         finally:
             os.remove(zip_file)
             shutil.rmtree(tmp_folder, ignore_errors=True)
+
+
+    @patch("samcli.lib.package.utils.dir_checksum")
+    @patch("samcli.lib.package.utils.create_package_zip_with_md5")
+    def test_zip_folder_uses_native_zip_and_md5_when_available(self, create_package_zip_with_md5_mock, dir_checksum_mock):
+        tmp_folder = tempfile.mkdtemp()
+        zip_file = os.path.join(tmp_folder, "native.zip")
+        with open(zip_file, "w", encoding="utf-8") as file_handle:
+            file_handle.write("zip")
+        create_package_zip_with_md5_mock.return_value = (zip_file, "native-md5")
+
+        with zip_folder(tmp_folder, make_zip) as (actual_zip_file, md5_hash):
+            self.assertEqual(actual_zip_file, zip_file)
+            self.assertEqual(md5_hash, "native-md5")
+
+        create_package_zip_with_md5_mock.assert_called_once_with(mock.ANY, tmp_folder, False)
+        dir_checksum_mock.assert_not_called()
+        self.assertFalse(os.path.exists(zip_file))
+        shutil.rmtree(tmp_folder, ignore_errors=True)
+
+    @patch("samcli.lib.package.utils.create_package_zip_with_md5")
+    def test_zip_folder_falls_back_when_native_zip_and_md5_is_unavailable(self, create_package_zip_with_md5_mock):
+        create_package_zip_with_md5_mock.return_value = None
+        tmp_folder = tempfile.mkdtemp()
+        with open(os.path.join(tmp_folder, "index.js"), "w", encoding="utf-8") as file_handle:
+            file_handle.write("exports.handler = () => {};")
+
+        with zip_folder(tmp_folder, make_zip) as (zip_file, md5_hash):
+            self.assertTrue(zipfile.is_zipfile(zip_file))
+            self.assertEqual(len(md5_hash), 32)
+
+        shutil.rmtree(tmp_folder, ignore_errors=True)
 
     def test_zip_folder_uses_different_path_for_same_file_in_different_run(self):
         all_zip_files = set()

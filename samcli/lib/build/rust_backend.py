@@ -623,6 +623,22 @@ def create_package_zip(output_base_path: str, source_root: str, lambda_permissio
         return None
 
 
+def create_package_zip_with_md5(
+    output_base_path: str, source_root: str, lambda_permissions: bool = False
+) -> Optional[tuple[str, str]]:
+    """Create a package ZIP and source-tree MD5 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "create_package_zip_with_md5", None)
+    if native_fn is None:
+        return None
+    try:
+        zip_path, md5_hash = native_fn(os.fspath(output_base_path), os.fspath(source_root), lambda_permissions)
+    except (OSError, TypeError):
+        return None
+    return str(zip_path), str(md5_hash)
+
+
 def create_lambda_zip_with_sha256(output_base_path: str, source_root: str) -> Optional[tuple[str, str]]:
     """Create a deterministic Lambda ZIP and its SHA256 through Rust when enabled."""
     if not is_enabled():
