@@ -839,19 +839,21 @@ class ApplicationBuilder:
 
         try:
             if not self._image_build_client:
-                if self._use_buildkit:
-                    container_client = self._container_client
-                    engine_type = container_client.get_runtime_type()
+                container_client = self._container_client
+                engine_type = container_client.get_runtime_type()
+                is_available, error_msg = CLIBuildClient.is_available(engine_type)
 
-                    is_available, error_msg = CLIBuildClient.is_available(engine_type)
-                    if not is_available:
-                        raise BuildkitNotAvailableException(error_msg)
-
+                if is_available:
                     self._image_build_client = CLIBuildClient(engine_type=engine_type)
-                    LOG.debug(f"Using CLIBuildClient with engine_type {engine_type}")
+                    LOG.debug("Using CLIBuildClient with engine_type %s", engine_type)
+                elif self._use_buildkit:
+                    raise BuildkitNotAvailableException(error_msg)
                 else:
-                    self._image_build_client = SDKBuildClient(self._container_client)
-                    LOG.debug("Using SDKBuildClient")
+                    LOG.debug(
+                        "CLI image build client is unavailable (%s); falling back to SDKBuildClient",
+                        error_msg,
+                    )
+                    self._image_build_client = SDKBuildClient(container_client)
             build_logs = self._image_build_client.build_image(**build_args)  # type: ignore[arg-type]
             LOG.debug(f"Image built for {function_name} function")
         except docker.errors.BuildError as ex:

@@ -183,7 +183,7 @@ class CLIBuildClient(ImageBuildClient):
         cmd.extend(["build", "-f", dockerfile, "-t", tag])
 
         if self.engine_type == "docker":
-            cmd.extend(["--provenance=false", "--sbom=false", "--load"])
+            cmd.extend(["--provenance=false", "--sbom=false", "--load", "--progress=plain"])
 
         if platform:
             cmd.extend(["--platform", platform])
@@ -210,15 +210,14 @@ class CLIBuildClient(ImageBuildClient):
         build_log: list[Dict[str, Any]] = []
         if process.stdout:
             for line in process.stdout:
-                build_log.append({"stream": line})
+                log = {"stream": line}
+                build_log.append(log)
+                yield log
 
         process.wait()
 
         if process.returncode != 0:
             raise docker.errors.BuildError(f"Build failed with exit code {process.returncode}", build_log)
-
-        # Return a generator that yields the logs
-        return (log for log in build_log)
 
     @staticmethod
     def is_available(engine_type: str) -> Tuple[bool, Optional[str]]:

@@ -132,6 +132,7 @@ class TestCLIBuildClient(TestCase):
             "--provenance=false",
             "--sbom=false",
             "--load",
+            "--progress=plain",
             "--platform",
             "linux/amd64",
             "--build-arg",
