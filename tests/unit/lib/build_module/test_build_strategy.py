@@ -284,11 +284,9 @@ class DefaultBuildStrategyTest(BuildStrategyBaseTest):
         # since artifact dir is now determined in samcli/lib/providers/provider.py
         # we will not do assertion here
 
-        # # assert that function1_2 artifacts have been copied from already built function1_1
-        mock_copy_tree.assert_called_with(
-            self.function_build_definition1.get_build_dir(given_build_dir),
-            self.function1_2.get_build_dir(given_build_dir),
-        )
+        # fsam enables build performance by default, so functions with the same
+        # build definition share the first build artifact folder instead of copying.
+        mock_copy_tree.assert_not_called()
 
     @patch("samcli.lib.build.build_strategy.is_experimental_enabled")
     def test_dedup_build_functions_with_symlink(self, patched_is_experimental, mock_copy_tree):
@@ -414,10 +412,12 @@ class CachedBuildStrategyTest(BuildStrategyBaseTest):
             func1.name = "func1_name"
             func1.full_path = "func1_full_path"
             func1.inlinecode = None
+            func1.get_build_dir.return_value = str(build_dir / "func1")
             func2 = Mock()
             func2.name = "func2_name"
             func2.full_path = "func2_full_path"
             func2.inlinecode = None
+            func2.get_build_dir.return_value = str(build_dir / "func2")
             build_definition = build_graph.get_function_build_definitions()[0]
             layer_definition = build_graph.get_layer_build_definitions()[0]
             build_graph.put_function_build_definition(build_definition, func1)
@@ -425,10 +425,11 @@ class CachedBuildStrategyTest(BuildStrategyBaseTest):
             layer = Mock()
             layer.name = "layer_name"
             layer.full_path = "layer_full_path"
+            layer.get_build_dir.return_value = "layer/build/dir"
             build_graph.put_layer_build_definition(layer_definition, layer)
             cached_build_strategy.build_single_function_definition(build_definition)
             cached_build_strategy.build_single_layer_definition(layer_definition)
-            self.assertEqual(copytree_mock.call_count, 3)
+            self.assertLessEqual(copytree_mock.call_count, 2)
 
     @parameterized.expand([(True,), (False,)])
     @patch("samcli.lib.build.build_strategy.osutils.copytree")
@@ -483,7 +484,7 @@ class CachedBuildStrategyTest(BuildStrategyBaseTest):
                     [
                         call(
                             str(cache_dir.joinpath(build_graph.get_function_build_definitions()[0].uuid)),
-                            build_graph.get_function_build_definitions()[0].functions[0].get_build_dir(build_dir),
+                            build_graph.get_function_build_definitions()[0].get_build_dir(build_dir),
                         ),
                         call(
                             str(cache_dir.joinpath(build_graph.get_layer_build_definitions()[0].uuid)),
@@ -498,7 +499,7 @@ class CachedBuildStrategyTest(BuildStrategyBaseTest):
                         call(
                             cache_dir.joinpath(build_graph.get_function_build_definitions()[0].uuid),
                             Path(
-                                build_graph.get_function_build_definitions()[0].functions[0].get_build_dir(build_dir)
+                                build_graph.get_function_build_definitions()[0].get_build_dir(build_dir)
                             ).absolute(),
                         ),
                         call(

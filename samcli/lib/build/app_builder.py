@@ -379,18 +379,17 @@ class ApplicationBuilder:
                 rust_graph_groups,
             )
 
-        self._compare_rust_function_dedupe(
-            build_graph, functions, function_env_vars, compact_graph_inputs, shadow_graph_groups
-        )
-
-        layer_dedupe_specs = (
-            self._layer_dedupe_specs(layers, layer_env_vars)
-            if is_rust_build_core_enabled() or is_rust_build_core_shadow_enabled()
-            else None
-        )
-        self._compare_rust_layer_dedupe(
-            build_graph, layers, layer_dedupe_specs, compact_graph_inputs, shadow_graph_groups
-        )
+        if is_rust_build_core_shadow_enabled():
+            self._compare_rust_function_dedupe(
+                build_graph, functions, function_env_vars, compact_graph_inputs, shadow_graph_groups
+            )
+            self._compare_rust_layer_dedupe(
+                build_graph,
+                layers,
+                self._layer_dedupe_specs(layers, layer_env_vars),
+                compact_graph_inputs,
+                shadow_graph_groups,
+            )
 
         build_graph.clean_redundant_definitions_and_update(not self._is_building_specific_resource)
         return build_graph
@@ -550,6 +549,9 @@ class ApplicationBuilder:
         compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
         shadow_graph_groups: Optional[tuple[List[List[int]], List[List[int]]]] = None,
     ) -> None:
+        if not is_rust_build_core_shadow_enabled():
+            return
+
         rust_graph_groups = (
             shadow_graph_groups
             if shadow_graph_groups is not None
@@ -651,6 +653,9 @@ class ApplicationBuilder:
         compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
         shadow_graph_groups: Optional[tuple[List[List[int]], List[List[int]]]] = None,
     ) -> None:
+        if not is_rust_build_core_shadow_enabled():
+            return
+
         if layer_dedupe_specs is None and compact_graph_inputs is None and shadow_graph_groups is None:
             return
 

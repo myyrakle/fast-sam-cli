@@ -59,6 +59,10 @@ class ExperimentalFlag:
     )
 
 
+def _default_experimental_enabled(config_entry: ExperimentalEntry) -> bool:
+    return config_entry in {ExperimentalFlag.BuildPerformance, ExperimentalFlag.PackagePerformance}
+
+
 def is_experimental_enabled(config_entry: ExperimentalEntry) -> bool:
     """Whether a given experimental flag is enabled or not.
     If experimentalAll is set to True, then it will always return True.
@@ -74,7 +78,9 @@ def is_experimental_enabled(config_entry: ExperimentalEntry) -> bool:
         Whether the experimental flag is enabled or not.
     """
     gc = GlobalConfig()
-    enabled = gc.get_value(config_entry, default=False, value_type=bool, is_flag=True)
+    enabled = gc.get_value(
+        config_entry, default=_default_experimental_enabled(config_entry), value_type=bool, is_flag=True
+    )
     if not enabled:
         enabled = gc.get_value(ExperimentalFlag.All, default=False, value_type=bool, is_flag=True)
     return enabled

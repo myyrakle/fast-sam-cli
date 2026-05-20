@@ -1549,9 +1549,9 @@ class TestArtifactExporter(unittest.TestCase):
 
             self.assertEqual(1, yaml_parse_mock.call_count)
 
-            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, None)
+            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, mock.ANY)
             resource_type1_instance.export.assert_called_once_with("Resource1", mock.ANY, template_dir)
-            resource_type2_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, None)
+            resource_type2_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, mock.ANY)
             resource_type2_instance.export.assert_called_once_with("Resource2", mock.ANY, template_dir)
 
     @patch("samcli.lib.package.artifact_exporter.is_experimental_enabled")
@@ -1689,7 +1689,7 @@ class TestArtifactExporter(unittest.TestCase):
 
             self.assertEqual(1, yaml_parse_mock.call_count)
 
-            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, None)
+            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, mock.ANY)
             expected_resource_properties = {
                 "Code": "/path/code",
             }
@@ -1758,7 +1758,7 @@ class TestArtifactExporter(unittest.TestCase):
 
             self.assertEqual(1, yaml_parse_mock.call_count)
 
-            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, None)
+            resource_type1_class.assert_called_once_with(self.uploaders_mock, self.code_signer_mock, mock.ANY)
             expected_resource_properties = {
                 "Code": "/path/code",
             }

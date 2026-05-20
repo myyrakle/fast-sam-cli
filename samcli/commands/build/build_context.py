@@ -359,7 +359,8 @@ class BuildContext:
 
     def _is_sam_template(self) -> bool:
         """Check if a given template is a SAM template"""
-        template_dict = get_template_data(self._template_file)
+        root_stack = SamLocalStackProvider.find_root_stack(self.stacks) if self.stacks else None
+        template_dict = root_stack.template_dict if root_stack else get_template_data(self._template_file)
         template_transforms = template_dict.get("Transform", [])
         if not isinstance(template_transforms, list):
             template_transforms = [template_transforms]
