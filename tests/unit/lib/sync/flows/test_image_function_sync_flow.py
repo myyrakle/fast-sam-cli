@@ -43,6 +43,13 @@ class TestImageFunctionSyncFlow(TestCase):
 
         build_context = MagicMock()
         build_context.function_provider.get.return_value = function_mock
+        build_context.container_env_var = {"Function1": {"ENV": "value"}}
+        build_context.container_env_var_file = "env.json"
+        build_context.build_images = {"Function1": "build-image"}
+        build_context.mount_with_write = True
+        build_context.mount_symlinks = True
+        build_context.use_buildkit = True
+        build_context.container_manager = None
 
         sync_flow = ImageFunctionSyncFlow(
             "Function1",
@@ -69,6 +76,18 @@ class TestImageFunctionSyncFlow(TestCase):
         docker_client = sync_flow._get_docker_client()
         self.assertIsNotNone(docker_client)
         self.assertIsNotNone(sync_flow._docker_client)
+        patched_get_validated_client.assert_not_called()
+
+    @patch("samcli.lib.sync.flows.image_function_sync_flow.get_validated_container_client")
+    def test_get_docker_client_reuses_container_manager_client(self, patched_get_validated_client):
+        sync_flow = self.create_function_sync_flow()
+        container_client = MagicMock()
+        sync_flow._build_context.container_manager = MagicMock(container_client=container_client)
+
+        docker_client = sync_flow._get_docker_client()
+
+        self.assertEqual(docker_client, container_client)
+        self.assertEqual(sync_flow._docker_client, container_client)
         patched_get_validated_client.assert_not_called()
 
     @patch("samcli.lib.sync.flows.image_function_sync_flow.ImageFunctionSyncFlow._boto_client")
@@ -108,6 +127,25 @@ class TestImageFunctionSyncFlow(TestCase):
             else:
                 get_mock.assert_called_once_with("Function1")
                 self.assertEqual(sync_flow._image_name, "ImageName1")
+                builder_mock.assert_called_once_with(
+                    sync_flow._build_context.collect_build_resources("Function1"),
+                    sync_flow._build_context.build_dir,
+                    sync_flow._build_context.base_dir,
+                    sync_flow._build_context.cache_dir,
+                    cached=False,
+                    is_building_specific_resource=True,
+                    manifest_path_override=sync_flow._build_context.manifest_path_override,
+                    container_manager=sync_flow._build_context.container_manager,
+                    container_client=patched_get_docker_client.return_value,
+                    mode=sync_flow._build_context.mode,
+                    container_env_var=sync_flow._build_context.container_env_var,
+                    container_env_var_file=sync_flow._build_context.container_env_var_file,
+                    build_images=sync_flow._build_context.build_images,
+                    build_in_source=sync_flow._build_context.build_in_source,
+                    mount_with_write=sync_flow._build_context.mount_with_write,
+                    mount_symlinks=sync_flow._build_context.mount_symlinks,
+                    use_buildkit=sync_flow._build_context.use_buildkit,
+                )
             self.assertEqual(
                 sync_flow._local_sha, str(patched_get_docker_client().images.get("ImageName1").attrs.get("Id"))
             )

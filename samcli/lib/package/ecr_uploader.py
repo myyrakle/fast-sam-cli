@@ -4,6 +4,7 @@ Client for uploading packaged artifacts to ecr
 
 import base64
 import logging
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Dict
@@ -50,16 +51,20 @@ class ECRUploader:
         self.stream = StreamWriter(stream=stream, auto_flush=True)
         self.log_streamer = LogStreamer(stream=self.stream)
         self.login_session_active = False
+        self._docker_client_lock = threading.Lock()
+        self._login_lock = threading.Lock()
 
     @property
     def docker_client(self):
         """Lazy initialization of Docker client - only validates when ECR operations are needed."""
         if self._validated_docker_client is None:
-            if self._docker_client_param is None:
-                # Only validate Docker client when ECR operations are actually needed
-                self._validated_docker_client = get_validated_container_client()
-            else:
-                self._validated_docker_client = self._docker_client_param
+            with self._docker_client_lock:
+                if self._validated_docker_client is None:
+                    if self._docker_client_param is None:
+                        # Only validate Docker client when ECR operations are actually needed
+                        self._validated_docker_client = get_validated_container_client()
+                    else:
+                        self._validated_docker_client = self._docker_client_param
         return self._validated_docker_client
 
     def login(self):
@@ -88,8 +93,10 @@ class ECRUploader:
         :return: remote ECR image path that has been uploaded.
         """
         if not self.login_session_active:
-            self.login()
-            self.login_session_active = True
+            with self._login_lock:
+                if not self.login_session_active:
+                    self.login()
+                    self.login_session_active = True
 
         # Sometimes the `resource_name` is used as the `image` parameter to `tag_translation`.
         # This is because these two cases (directly from an archive or by ID) are effectively
@@ -119,7 +126,7 @@ class ECRUploader:
                 repository=repository, tag=_tag, auth_config=self.auth_config, stream=True, decode=True
             )
             if not self.no_progressbar:
-                self.log_streamer.stream_progress(push_logs)
+                LogStreamer(stream=self.stream).stream_progress(push_logs)
             else:
                 # we need to wait till the image got pushed to ecr, without this workaround sam sync for template
                 # contains image always fail, because the provided ecr uri is not exist.

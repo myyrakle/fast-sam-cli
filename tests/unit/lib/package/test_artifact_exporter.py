@@ -5,6 +5,7 @@ import platform
 import random
 import string
 import tempfile
+import threading
 import unittest
 import zipfile
 from contextlib import contextmanager, closing
@@ -1632,6 +1633,50 @@ class TestArtifactExporter(unittest.TestCase):
             resource_type2_instance.export.assert_called_once_with("Resource2", mock.ANY, template_dir)
 
         self.assertEqual({"key1": "value1", "key2": "value2"}, _cache)
+
+    def test_template_export_image_resources_in_parallel(self):
+        barrier = threading.Barrier(2)
+
+        class ImageResource(Resource):
+            RESOURCE_TYPE = "resource_type_image"
+            ARTIFACT_TYPE = IMAGE
+            EXPORT_DESTINATION = Destination.ECR
+
+            def export(self, resource_id, resource_dict, parent_dir):
+                barrier.wait(timeout=2)
+                resource_dict["ImageUri"] = f"mock-ecr/{resource_id}"
+
+        template_dict = {
+            "Resources": {
+                "ImageFunction1": {
+                    "Type": "resource_type_image",
+                    "Properties": {"PackageType": IMAGE, "ImageUri": "local-image-1"},
+                },
+                "ImageFunction2": {
+                    "Type": "resource_type_image",
+                    "Properties": {"PackageType": IMAGE, "ImageUri": "local-image-2"},
+                },
+            }
+        }
+        template_str = json.dumps(template_dict, indent=4, ensure_ascii=False)
+
+        template_exporter = Template(
+            template_path=None,
+            parent_dir=None,
+            uploaders=self.uploaders_mock,
+            code_signer=None,
+            resources_to_export=[ImageResource],
+            template_str=template_str,
+        )
+
+        exported_template = template_exporter.export()
+
+        self.assertEqual(
+            exported_template["Resources"]["ImageFunction1"]["Properties"]["ImageUri"], "mock-ecr/ImageFunction1"
+        )
+        self.assertEqual(
+            exported_template["Resources"]["ImageFunction2"]["Properties"]["ImageUri"], "mock-ecr/ImageFunction2"
+        )
 
     @patch("samcli.lib.package.artifact_exporter.yaml_parse")
     def test_cdk_template_export(self, yaml_parse_mock):

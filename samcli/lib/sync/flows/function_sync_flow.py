@@ -140,11 +140,6 @@ class FunctionSyncFlow(SyncFlow, ABC):
         since a manually created function version resource behaves statically in a stack.
         Redeploying a version resource through CFN will not create a new version.
         """
-        LOG.debug("%sWaiting on Remote Function Update", self.log_prefix)
-        self._lambda_waiter.wait(
-            FunctionName=self.get_physical_id(self._function_identifier), WaiterConfig=self._lambda_waiter_config
-        )
-        LOG.debug("%sRemote Function Updated", self.log_prefix)
         sync_flows: List[SyncFlow] = list()
 
         function_resource = self._get_resource(self._function_identifier)
@@ -153,6 +148,10 @@ class FunctionSyncFlow(SyncFlow, ABC):
 
         auto_publish_alias_name = function_resource.get("Properties", dict()).get("AutoPublishAlias", None)
         if auto_publish_alias_name:
+            function_physical_id = self.get_physical_id(self._function_identifier)
+            LOG.debug("%sWaiting on Remote Function Update", self.log_prefix)
+            self._lambda_waiter.wait(FunctionName=function_physical_id, WaiterConfig=self._lambda_waiter_config)
+            LOG.debug("%sRemote Function Updated", self.log_prefix)
             sync_flows.append(
                 AliasVersionSyncFlow(
                     self._function_identifier,

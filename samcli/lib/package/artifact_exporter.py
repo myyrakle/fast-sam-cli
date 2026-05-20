@@ -17,6 +17,7 @@ Exporting resources defined in the cloudformation template to the cloud.
 import copy
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 from botocore.utils import set_value_from_jmespath
@@ -43,7 +44,7 @@ from samcli.lib.package.utils import (
 )
 from samcli.lib.providers.provider import get_full_path
 from samcli.lib.samlib.resource_metadata_normalizer import ResourceMetadataNormalizer
-from samcli.lib.utils.packagetype import ZIP
+from samcli.lib.utils.packagetype import IMAGE, ZIP
 from samcli.lib.utils.resources import (
     AWS_CLOUDFORMATION_STACK,
     AWS_CLOUDFORMATION_STACKSET,
@@ -57,6 +58,8 @@ from samcli.yamlhelper import yaml_dump, yaml_parse
 LOG = logging.getLogger(__name__)
 
 # NOTE: sriram-mv, A cyclic dependency on `Template` needs to be broken.
+
+MAX_PARALLEL_IMAGE_EXPORTS = 8
 
 
 def _resolve_nested_stack_parameters(nested_params: Dict, parent_parameter_values: Dict) -> Dict:
@@ -478,6 +481,7 @@ class Template:
         if is_experimental_enabled(ExperimentalFlag.PackagePerformance):
             cache = {}
 
+        image_export_tasks = []
         for resource_logical_id, resource in iter_regular_resources(self.template_dict):
             resource_type = resource.get("Type", None)
             resource_dict = resource.get("Properties", {})
@@ -492,7 +496,23 @@ class Template:
                 # Export code resources
                 exporter = exporter_class(self.uploaders, self.code_signer, cache)
                 exporter.parent_parameter_values = self.parameter_values
-                exporter.export(full_path, resource_dict, self.template_dir)
+                if exporter_class.ARTIFACT_TYPE == IMAGE:
+                    image_export_tasks.append((exporter, full_path, resource_dict))
+                else:
+                    exporter.export(full_path, resource_dict, self.template_dir)
+
+        if len(image_export_tasks) == 1:
+            exporter, full_path, resource_dict = image_export_tasks[0]
+            exporter.export(full_path, resource_dict, self.template_dir)
+        elif image_export_tasks:
+            max_workers = min(MAX_PARALLEL_IMAGE_EXPORTS, len(image_export_tasks))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(exporter.export, full_path, resource_dict, self.template_dir)
+                    for exporter, full_path, resource_dict in image_export_tasks
+                ]
+                for future in as_completed(futures):
+                    future.result()
 
         return self.template_dict
 

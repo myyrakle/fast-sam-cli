@@ -1105,6 +1105,30 @@ Commands you can use next
         return self._mode
 
     @property
+    def container_env_var(self) -> Optional[dict]:
+        return self._container_env_var
+
+    @property
+    def container_env_var_file(self) -> Optional[str]:
+        return self._container_env_var_file
+
+    @property
+    def build_images(self) -> Optional[dict]:
+        return self._build_images
+
+    @property
+    def mount_with_write(self) -> bool:
+        return self._mount_with == MountMode.WRITE
+
+    @property
+    def mount_symlinks(self) -> Optional[bool]:
+        return self._mount_symlinks
+
+    @property
+    def use_buildkit(self) -> Optional[bool]:
+        return self._use_buildkit
+
+    @property
     def use_base_dir(self) -> bool:
         return self._use_raw_codeuri
 

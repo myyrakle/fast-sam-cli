@@ -75,7 +75,10 @@ class ImageFunctionSyncFlow(FunctionSyncFlow):
     def _get_docker_client(self) -> DockerClient:
         """Lazy instantiates and returns the docker client"""
         if not self._docker_client:
-            self._docker_client = get_validated_container_client()
+            container_manager = self._build_context.container_manager
+            self._docker_client = (
+                container_manager.container_client if container_manager else get_validated_container_client()
+            )
         return self._docker_client
 
     def _get_ecr_client(self) -> Any:
@@ -111,8 +114,15 @@ class ImageFunctionSyncFlow(FunctionSyncFlow):
             is_building_specific_resource=True,
             manifest_path_override=self._build_context.manifest_path_override,
             container_manager=self._build_context.container_manager,
+            container_client=self._get_docker_client(),
             mode=self._build_context.mode,
+            container_env_var=self._build_context.container_env_var,
+            container_env_var_file=self._build_context.container_env_var_file,
+            build_images=self._build_context.build_images,
             build_in_source=self._build_context.build_in_source,
+            mount_with_write=self._build_context.mount_with_write,
+            mount_symlinks=self._build_context.mount_symlinks,
+            use_buildkit=self._build_context.use_buildkit,
         )
         self._image_name = builder.build().artifacts.get(self._function_identifier)
 
