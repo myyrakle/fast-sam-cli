@@ -18,6 +18,7 @@ from samcli.commands.package.exceptions import (
     ImageNotFoundError,
     DeleteArtifactFailedError,
 )
+from samcli.lib.package import ecr_uploader as ecr_uploader_module
 from samcli.lib.package.ecr_uploader import ECRUploader
 from samcli.lib.package.image_utils import SHA_CHECKSUM_TRUNCATION_LENGTH
 from samcli.lib.utils.stream_writer import StreamWriter
@@ -39,6 +40,7 @@ class TestECRUploader(TestCase):
         self.image_uri = "900643008914.dkr.ecr.us-east-1.amazonaws.com/" + self.ecr_repo + ":" + self.tag
         self.property_name = "AWS::Serverless::Function"
         self.resource_id = "HelloWorldFunction"
+        ecr_uploader_module._AUTH_CONFIG_CACHE.clear()
 
     def test_ecr_uploader_init(self):
         ecr_uploader = ECRUploader(
@@ -184,6 +186,38 @@ class TestECRUploader(TestCase):
         )
 
         ecr_uploader.login()
+
+    @patch("samcli.lib.package.ecr_uploader.base64")
+    def test_login_reuses_cached_auth_config_for_registry(self, base64_mock):
+        base64_mock.b64decode.return_value = b"username:password"
+        registry = "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+        self.ecr_client.get_authorization_token.return_value = {
+            "authorizationData": [{"authorizationToken": "auth_token", "proxyEndpoint": f"https://{registry}"}]
+        }
+
+        first_uploader = ECRUploader(
+            docker_client=self.docker_client,
+            ecr_client=self.ecr_client,
+            ecr_repo=f"{registry}/repo1",
+            ecr_repo_multi=self.ecr_repo_multi,
+            tag=self.tag,
+        )
+        second_uploader = ECRUploader(
+            docker_client=self.docker_client,
+            ecr_client=self.ecr_client,
+            ecr_repo=f"{registry}/repo2",
+            ecr_repo_multi=self.ecr_repo_multi,
+            tag=self.tag,
+        )
+
+        first_uploader.login(registry)
+        second_uploader.login(registry)
+
+        self.ecr_client.get_authorization_token.assert_called_once()
+        self.docker_client.login.assert_called_once_with(
+            username="AWS", password="password", registry=f"https://{registry}"
+        )
+        self.assertEqual(second_uploader.auth_config, {"username": "username", "password": "password"})
 
     @patch("samcli.lib.package.ecr_uploader.base64")
     def test_directly_upload_login_success(self, base64_mock):

@@ -29,6 +29,16 @@ from samcli.local.docker.utils import get_validated_container_client
 LOG = logging.getLogger(__name__)
 
 ECR_USERNAME = "AWS"
+_AUTH_CONFIG_CACHE: Dict[str, Dict[str, str]] = {}
+_AUTH_CONFIG_CACHE_LOCK = threading.Lock()
+
+
+def _registry_cache_key(registry: str) -> str:
+    return registry.removeprefix("https://").removeprefix("http://").rstrip("/")
+
+
+def _repository_registry(repository: str) -> str:
+    return repository.split("/", 1)[0]
 
 
 class ECRUploader:
@@ -67,23 +77,33 @@ class ECRUploader:
                         self._validated_docker_client = self._docker_client_param
         return self._validated_docker_client
 
-    def login(self):
+    def login(self, registry_hint: str = ""):
         """
         Logs into the supplied ECR with credentials.
         """
-        try:
-            token = self.ecr_client.get_authorization_token()
-        except botocore.exceptions.ClientError as ex:
-            raise ECRAuthorizationError(msg=ex.response["Error"]["Message"]) from ex
+        registry_hint_key = _registry_cache_key(registry_hint) if registry_hint else ""
+        with _AUTH_CONFIG_CACHE_LOCK:
+            if registry_hint_key and registry_hint_key in _AUTH_CONFIG_CACHE:
+                self.auth_config = dict(_AUTH_CONFIG_CACHE[registry_hint_key])
+                return
 
-        username, password = base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":")
-        registry = token["authorizationData"][0]["proxyEndpoint"]
+            try:
+                token = self.ecr_client.get_authorization_token()
+            except botocore.exceptions.ClientError as ex:
+                raise ECRAuthorizationError(msg=ex.response["Error"]["Message"]) from ex
 
-        try:
-            self.docker_client.login(username=ECR_USERNAME, password=password, registry=registry)
-        except APIError as ex:
-            raise DockerLoginFailedError(msg=str(ex)) from ex
-        self.auth_config = {"username": username, "password": password}
+            username, password = (
+                base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":")
+            )
+            registry = token["authorizationData"][0]["proxyEndpoint"]
+            registry_key = _registry_cache_key(registry)
+
+            try:
+                self.docker_client.login(username=ECR_USERNAME, password=password, registry=registry)
+            except APIError as ex:
+                raise DockerLoginFailedError(msg=str(ex)) from ex
+            self.auth_config = {"username": username, "password": password}
+            _AUTH_CONFIG_CACHE[registry_key] = dict(self.auth_config)
 
     def upload(self, image, resource_name):
         """
@@ -92,12 +112,6 @@ class ECRUploader:
         :param resource_name: logical ID of the resource to be uploaded to ECR.
         :return: remote ECR image path that has been uploaded.
         """
-        if not self.login_session_active:
-            with self._login_lock:
-                if not self.login_session_active:
-                    self.login()
-                    self.login_session_active = True
-
         # Sometimes the `resource_name` is used as the `image` parameter to `tag_translation`.
         # This is because these two cases (directly from an archive or by ID) are effectively
         # anonymous, so the best identifier available in scope is the resource name.
@@ -120,6 +134,12 @@ class ECRUploader:
                 if not self.ecr_repo_multi or not isinstance(self.ecr_repo_multi, dict)
                 else self.ecr_repo_multi.get(resource_name)
             )
+
+            if not self.login_session_active:
+                with self._login_lock:
+                    if not self.login_session_active:
+                        self.login(_repository_registry(repository) if isinstance(repository, str) else "")
+                        self.login_session_active = True
 
             docker_img.tag(repository=repository, tag=_tag)
             push_logs = self.docker_client.api.push(
