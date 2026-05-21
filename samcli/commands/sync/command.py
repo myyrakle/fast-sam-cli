@@ -47,9 +47,11 @@ from samcli.commands.sync.core.command import SyncCommand
 from samcli.commands.sync.sync_context import SyncContext
 from samcli.lib.bootstrap.bootstrap import manage_stack
 from samcli.lib.build.bundler import EsbuildBundlerManager
+from samcli.lib.build.app_builder import ApplicationBuilder, ApplicationBuildResult
 from samcli.lib.cli_validation.image_repository_validation import image_repository_validation
 from samcli.lib.providers.provider import (
     ResourceIdentifier,
+    ResourcesToBuildCollector,
     get_all_resource_ids,
     get_unique_resource_ids,
 )
@@ -87,6 +89,74 @@ DESCRIPTION = """
 
   `$ sam sync` also supports nested stacks and nested stack resources.
 """
+
+
+def _collect_prebuild_resources(
+    build_context: "BuildContext", resource_ids: Set[ResourceIdentifier]
+) -> ResourcesToBuildCollector:
+    """Collect buildable function/layer resources selected for code sync.
+
+    This keeps non-buildable skip-build resources on their existing per-flow paths,
+    while allowing regular buildable functions/layers to share one ApplicationBuilder
+    run for graph dedupe and parallel image builds.
+    """
+    result = ResourcesToBuildCollector()
+    seen_functions = set()
+    seen_layers = set()
+
+    for resource_id in resource_ids:
+        resource_id_str = str(resource_id)
+        function = build_context.function_provider.get(resource_id_str)
+        layer = build_context.layer_provider.get(resource_id_str)
+
+        should_collect = bool(function and function.function_build_info.is_buildable()) or bool(
+            layer and build_context.is_layer_buildable(layer)
+        )
+        if not should_collect:
+            continue
+
+        selected_resources = build_context.collect_build_resources(resource_id_str)
+        for selected_function in selected_resources.functions:
+            if selected_function.full_path not in seen_functions:
+                result.add_function(selected_function)
+                seen_functions.add(selected_function.full_path)
+        for selected_layer in selected_resources.layers:
+            if selected_layer.full_path not in seen_layers:
+                result.add_layer(selected_layer)
+                seen_layers.add(selected_layer.full_path)
+
+    return result
+
+
+def _prebuild_code_sync_resources(
+    build_context: "BuildContext", resource_ids: Set[ResourceIdentifier]
+) -> Optional[ApplicationBuildResult]:
+    """Build selected code-sync resources once and share artifacts with sync flows."""
+    resources_to_build = _collect_prebuild_resources(build_context, resource_ids)
+    if not resources_to_build.functions and not resources_to_build.layers:
+        return None
+
+    builder = ApplicationBuilder(
+        resources_to_build,
+        build_context.build_dir,
+        build_context.base_dir,
+        build_context.cache_dir,
+        build_context.cached,
+        is_building_specific_resource=True,
+        manifest_path_override=build_context.manifest_path_override,
+        container_manager=build_context.container_manager,
+        parallel=True,
+        mode=build_context.mode,
+        container_env_var=build_context.container_env_var,
+        container_env_var_file=build_context.container_env_var_file,
+        build_images=build_context.build_images,
+        combine_dependencies=not build_context.create_auto_dependency_layer,
+        build_in_source=build_context.build_in_source,
+        mount_with_write=build_context.mount_with_write,
+        mount_symlinks=build_context.mount_symlinks,
+        use_buildkit=build_context.use_buildkit,
+    )
+    return builder.build()
 
 
 SYNC_INFO_TEXT = """
@@ -518,9 +588,12 @@ def execute_code_sync(
         else set(get_all_resource_ids(stacks))
     )
 
+    prebuilt_result = build_context.build_result if use_built_resources else _prebuild_code_sync_resources(
+        build_context, sync_flow_resource_ids
+    )
+
     for resource_id in sync_flow_resource_ids:
-        built_result = build_context.build_result if use_built_resources else None
-        sync_flow = factory.create_sync_flow(resource_id, built_result)
+        sync_flow = factory.create_sync_flow(resource_id, prebuilt_result)
         if sync_flow:
             executor.add_sync_flow(sync_flow)
         else:

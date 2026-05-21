@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Generator, Optional, Tuple
 
@@ -156,6 +157,9 @@ class SDKBuildClient(ImageBuildClient):
 class CLIBuildClient(ImageBuildClient):
     """Build client using docker/finch CLI commands."""
 
+    _availability_cache: Dict[str, Tuple[bool, Optional[str]]] = {}
+    _availability_cache_lock = threading.Lock()
+
     def __init__(self, engine_type: str):
         self.engine_type = engine_type
         self.cli_command = engine_type
@@ -221,33 +225,56 @@ class CLIBuildClient(ImageBuildClient):
 
     @staticmethod
     def is_available(engine_type: str) -> Tuple[bool, Optional[str]]:
+        with CLIBuildClient._availability_cache_lock:
+            cached_result = CLIBuildClient._availability_cache.get(engine_type)
+            if cached_result is not None:
+                return cached_result
+
+        result: Tuple[bool, Optional[str]]
         if engine_type == "docker":
             if not shutil.which("docker"):
-                return (False, "Docker CLI not found")
+                result = (False, "Docker CLI not found")
+                with CLIBuildClient._availability_cache_lock:
+                    CLIBuildClient._availability_cache[engine_type] = result
+                return result
 
-            result = subprocess.run(
+            completed_process = subprocess.run(
                 ["docker", "buildx", "version"],
                 capture_output=True,
                 check=False,
             )
-            if result.returncode != 0:
-                return (False, "docker buildx plugin not available")
+            if completed_process.returncode != 0:
+                result = (False, "docker buildx plugin not available")
+                with CLIBuildClient._availability_cache_lock:
+                    CLIBuildClient._availability_cache[engine_type] = result
+                return result
 
-            return (True, None)
+            result = (True, None)
 
         elif engine_type == "finch":
             if not shutil.which("finch"):
-                return (False, "Finch CLI not found")
+                result = (False, "Finch CLI not found")
+                with CLIBuildClient._availability_cache_lock:
+                    CLIBuildClient._availability_cache[engine_type] = result
+                return result
 
-            result = subprocess.run(
+            completed_process = subprocess.run(
                 ["finch", "version"],
                 capture_output=True,
                 check=False,
             )
 
-            if result.returncode != 0:
-                return (False, "finch CLI not working")
+            if completed_process.returncode != 0:
+                result = (False, "finch CLI not working")
+                with CLIBuildClient._availability_cache_lock:
+                    CLIBuildClient._availability_cache[engine_type] = result
+                return result
 
-            return (True, None)
+            result = (True, None)
 
-        return (False, f"Unknown engine type: {engine_type}")
+        else:
+            result = (False, f"Unknown engine type: {engine_type}")
+
+        with CLIBuildClient._availability_cache_lock:
+            CLIBuildClient._availability_cache[engine_type] = result
+        return result
