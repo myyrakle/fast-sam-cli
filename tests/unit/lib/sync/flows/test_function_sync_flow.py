@@ -120,7 +120,12 @@ class TestFunctionSyncFlow(TestCase):
         call_args = sync_flow._lambda_client.publish_version.call_args
         self.assertEqual(call_args.kwargs.get("PublishTo"), "LATEST_PUBLISHED")
 
-        wait_mock.assert_called_once_with(sync_flow._lambda_client, function_physical_id, response_version)
+        wait_mock.assert_called_once_with(
+            sync_flow._lambda_client,
+            function_physical_id,
+            response_version,
+            initial_response={"Version": response_version},
+        )
 
     @parameterized.expand(
         [
@@ -168,7 +173,9 @@ class TestFunctionSyncFlow(TestCase):
         self.lambda_client_mock.update_function_code.assert_called_once_with(**expected_params)
 
         # Check wait was called
-        wait_mock.assert_called_once_with(self.lambda_client_mock, function_physical_id)
+        wait_mock.assert_called_once_with(
+            self.lambda_client_mock, function_physical_id, initial_response={"FunctionName": function_physical_id}
+        )
 
     @parameterized.expand(
         [

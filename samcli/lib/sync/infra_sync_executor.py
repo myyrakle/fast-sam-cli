@@ -130,6 +130,9 @@ class InfraSyncExecutor:
         self._sync_context = sync_context
 
         self._code_sync_resources = set()
+        self._template_cache: Dict[str, Optional[Dict]] = {}
+        self._stack_parameters_cache: Dict[str, List[Dict[str, str]]] = {}
+        self._deployed_template_cache: Dict[str, Dict] = {}
 
         session = Session(profile_name=self._deploy_context.profile, region_name=self._deploy_context.region)
         self._cfn_client = self._boto_client("cloudformation", session)
@@ -259,14 +262,10 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
             return False
 
         try:
-            last_deployed_template_str = self._cfn_client.get_template(
-                StackName=stack_name, TemplateStage="Original"
-            ).get("TemplateBody", "")
+            last_deployed_template_dict = self._get_deployed_template(stack_name)
         except ClientError as ex:
             LOG.debug("Stack with name %s does not exist on CloudFormation", stack_name, exc_info=ex)
             return False
-
-        last_deployed_template_dict = yaml_parse(last_deployed_template_str)
 
         sanitized_current_template = copy.deepcopy(current_template)
         sanitized_last_template = copy.deepcopy(last_deployed_template_dict)
@@ -668,6 +667,9 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
         Dict
             The parsed template dict
         """
+        if template_path in self._template_cache:
+            return self._template_cache[template_path]
+
         template = None
         # If the customer template uses a nested stack with location/template URL in S3
         if template_path.startswith("https://"):
@@ -677,7 +679,17 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
         else:
             template = get_template_data(template_path)
 
+        self._template_cache[template_path] = template
         return template
+
+    def _get_deployed_template(self, stack_name: str) -> Dict:
+        """Return and cache the parsed original CloudFormation template for a stack."""
+        if stack_name not in self._deployed_template_cache:
+            last_deployed_template_str = self._cfn_client.get_template(
+                StackName=stack_name, TemplateStage="Original"
+            ).get("TemplateBody", "")
+            self._deployed_template_cache[stack_name] = yaml_parse(last_deployed_template_str)
+        return self._deployed_template_cache[stack_name]
 
     def _param_overrides_subset_of_stack_params(self, stack_name: str, param_overrides: Dict[str, str]) -> bool:
         """
@@ -692,6 +704,9 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
             e.g. {'Foo1': 'Bar1', 'Foo2': 'Bar2'}
 
         """
+
+        if not param_overrides:
+            return True
 
         # Current stack parameters returned from describe_stacks, taking the following format
         # e.g [{'ParameterKey': 'Foo1', 'ParameterValue': 'Bar1'}, {'ParameterKey': 'Foo2', 'ParameterValue': 'Bar2'}]
@@ -730,6 +745,9 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
             List of Dicts in the form { 'ParameterKey': Foo, 'ParameterValue': Bar }
 
         """
+        if stack_name in self._stack_parameters_cache:
+            return self._stack_parameters_cache[stack_name]
+
         stacks = self._cfn_client.describe_stacks(StackName=stack_name).get("Stacks")
 
         if len(stacks) < 1:
@@ -738,10 +756,12 @@ an infra sync will be executed for an CloudFormation deployment to improve perfo
             )
             return []
 
-        return cast(
+        parameters = cast(
             List[Dict[str, str]],
             stacks[0].get("Parameters", []),
         )
+        self._stack_parameters_cache[stack_name] = parameters
+        return parameters
 
     def _get_remote_template_data(self, template_path: str) -> Optional[Dict]:
         """

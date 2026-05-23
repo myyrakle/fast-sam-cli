@@ -371,3 +371,23 @@ class TestZipFunctionSyncFlow(TestCase):
         wait_for_function_update_complete(given_lambda_client, given_physical_id)
 
         given_lambda_client.get_function.assert_called_with(FunctionName=given_physical_id)
+
+    def test_wait_for_function_status_uses_successful_initial_response(self):
+        given_lambda_client = MagicMock()
+        given_physical_id = "function"
+
+        wait_for_function_update_complete(
+            given_lambda_client, given_physical_id, initial_response={"LastUpdateStatus": "Successful"}
+        )
+
+        given_lambda_client.get_function.assert_not_called()
+
+    def test_wait_for_function_status_polls_when_initial_response_has_no_status(self):
+        given_lambda_client = MagicMock()
+        given_physical_id = "function"
+        function_result = {"Configuration": {"LastUpdateStatus": "Successful"}}
+        given_lambda_client.get_function.return_value = function_result
+
+        wait_for_function_update_complete(given_lambda_client, given_physical_id, initial_response={"Version": "1"})
+
+        given_lambda_client.get_function.assert_called_once_with(FunctionName=given_physical_id)
