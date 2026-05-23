@@ -143,64 +143,38 @@ def _build_pseudo_parameters(
     return None
 
 
+def _loop_variable_placeholder(loop_variable: str) -> str:
+    return f"${{{loop_variable}}}"
+
+
 def contains_loop_variable(value: Any, loop_variable: str) -> bool:
     """
     Check if a value contains a reference to the loop variable.
 
     This checks for ${LoopVariable} patterns in strings, {"Ref": LoopVariable}
     dicts, and recursively checks nested structures.
-
-    Parameters
-    ----------
-    value : Any
-        The value to check
-    loop_variable : str
-        The loop variable name to look for
-
-    Returns
-    -------
-    bool
-        True if the value contains the loop variable, False otherwise
     """
     if isinstance(value, str):
-        pattern = r"\$\{" + re.escape(loop_variable) + r"\}"
-        return bool(re.search(pattern, value))
-    elif isinstance(value, dict):
+        return _loop_variable_placeholder(loop_variable) in value
+    if isinstance(value, dict):
         # Check for {"Ref": loop_variable} — used in Fn::FindInMap after build
-        if "Ref" in value and value["Ref"] == loop_variable:
+        if value.get("Ref") == loop_variable:
             return True
         if "Fn::Sub" in value:
             sub_value = value["Fn::Sub"]
             if isinstance(sub_value, str):
                 return contains_loop_variable(sub_value, loop_variable)
-            elif isinstance(sub_value, list) and len(sub_value) >= 1:
+            if isinstance(sub_value, list) and len(sub_value) >= 1:
                 return contains_loop_variable(sub_value[0], loop_variable)
         return any(contains_loop_variable(v, loop_variable) for v in value.values())
-    elif isinstance(value, list):
+    if isinstance(value, list):
         return any(contains_loop_variable(item, loop_variable) for item in value)
     return False
 
 
 def substitute_loop_variable(template_str: str, loop_variable: str, value: str) -> str:
-    """
-    Substitute the loop variable in a template string with a value.
-
-    Parameters
-    ----------
-    template_str : str
-        The template string containing ${LoopVariable} patterns
-    loop_variable : str
-        The loop variable name to substitute
-    value : str
-        The value to substitute
-
-    Returns
-    -------
-    str
-        The string with the loop variable substituted
-    """
-    pattern = r"\$\{" + re.escape(loop_variable) + r"\}"
-    return re.sub(pattern, value, template_str)
+    """Substitute ${LoopVariable} placeholders in a template string."""
+    return template_str.replace(_loop_variable_placeholder(loop_variable), value)
 
 
 def sanitize_resource_key_for_mapping(resource_key: str) -> str:

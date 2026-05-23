@@ -285,6 +285,36 @@ class TestECRUploader(TestCase):
 
         ecr_uploader.upload(image, resource_name="HelloWorldFunction")
 
+    def test_upload_skips_push_when_image_tag_already_exists(self):
+        image = "myimage:v1"
+        docker_image = Mock()
+        docker_image.id = "sha256:1234567890abcdef"
+        self.docker_client.images.get.return_value = docker_image
+        self.ecr_client.batch_get_image.return_value = {
+            "images": [{"imageId": {"imageTag": "myimage-1234567890ab-v1"}}]
+        }
+
+        ecr_uploader = ECRUploader(
+            docker_client=self.docker_client,
+            ecr_client=self.ecr_client,
+            ecr_repo=self.ecr_repo,
+            ecr_repo_multi=None,
+            tag=self.tag,
+        )
+        ecr_uploader.login = MagicMock()
+
+        image_uri = ecr_uploader.upload(image, resource_name="HelloWorldFunction")
+
+        self.assertEqual(image_uri, f"{self.ecr_repo}:myimage-1234567890ab-v1")
+        self.assertTrue(ecr_uploader.last_upload_skipped)
+        self.ecr_client.batch_get_image.assert_called_once_with(
+            repositoryName=self.ecr_repo,
+            imageIds=[{"imageTag": "myimage-1234567890ab-v1"}],
+        )
+        ecr_uploader.login.assert_not_called()
+        docker_image.tag.assert_not_called()
+        self.docker_client.api.push.assert_not_called()
+
     def test_upload_failure_while_streaming(self):
         image = "myimage:v1"
         self.docker_client.api.push.return_value.__iter__.return_value = iter(

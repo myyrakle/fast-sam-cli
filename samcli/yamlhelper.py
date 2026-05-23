@@ -114,18 +114,23 @@ def _dict_constructor(loader, node):
 
 def yaml_parse(yamlstr) -> Dict:
     """Parse a yaml string"""
-    try:
-        # PyYAML doesn't support json as well as it should, so if the input
-        # is actually just json it is better to parse it with the standard
-        # json parser.
-        return cast(Dict, json.loads(yamlstr, object_pairs_hook=OrderedDict))
-    except ValueError:
-        yaml.constructor.SafeConstructor.yaml_constructors[TIMESTAMP_TAG] = (
-            yaml.constructor.SafeConstructor.yaml_constructors[TAG_STR]
-        )
-        yaml.SafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _dict_constructor)
-        yaml.SafeLoader.add_multi_constructor("!", intrinsics_multi_constructor)
-        return cast(Dict, yaml.safe_load(yamlstr))
+    stripped = yamlstr.lstrip()
+    if stripped.startswith(("{", "[")):
+        try:
+            # PyYAML doesn't support json as well as it should, so if the input
+            # is actually just json it is better to parse it with the standard
+            # json parser. Avoid trying JSON first for normal YAML templates;
+            # large YAML files otherwise pay for a guaranteed parser failure.
+            return cast(Dict, json.loads(yamlstr, object_pairs_hook=OrderedDict))
+        except ValueError:
+            pass
+
+    yaml.constructor.SafeConstructor.yaml_constructors[TIMESTAMP_TAG] = (
+        yaml.constructor.SafeConstructor.yaml_constructors[TAG_STR]
+    )
+    yaml.SafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _dict_constructor)
+    yaml.SafeLoader.add_multi_constructor("!", intrinsics_multi_constructor)
+    return cast(Dict, yaml.safe_load(yamlstr))
 
 
 def parse_yaml_file(file_path, extra_context: Optional[Dict] = None) -> Dict:

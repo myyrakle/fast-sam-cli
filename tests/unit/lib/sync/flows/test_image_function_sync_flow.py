@@ -189,6 +189,74 @@ class TestImageFunctionSyncFlow(TestCase):
     @patch("samcli.lib.sync.flows.function_sync_flow.wait_for_function_update_complete")
     @patch("samcli.lib.sync.flows.image_function_sync_flow.ECRUploader")
     @patch("samcli.lib.sync.sync_flow.Session")
+    def test_sync_context_image_repo_skips_update_when_remote_image_matches(
+        self, session_mock, uploader_mock, wait_mock, mock_get_validated_client
+    ):
+        docker_client_mock = MagicMock()
+        mock_get_validated_client.return_value = docker_client_mock
+
+        sync_flow = self.create_function_sync_flow()
+        sync_flow._image_name = "ImageName1"
+
+        uploader_mock.return_value.upload.return_value = "repo_uri:existing-tag"
+        uploader_mock.return_value.last_upload_skipped = True
+
+        sync_flow._get_lock_chain = MagicMock()
+        sync_flow.has_locks = MagicMock()
+
+        sync_flow.get_physical_id = MagicMock()
+        sync_flow.get_physical_id.return_value = "PhysicalFunction1"
+        sync_flow._deploy_context.image_repository = "repo_uri"
+
+        sync_flow.set_up()
+        sync_flow._lambda_client.get_function.return_value = {"Code": {"ImageUri": "repo_uri:existing-tag"}}
+
+        sync_flow.sync()
+
+        uploader_mock.return_value.upload.assert_called_once_with("ImageName1", "Function1")
+        sync_flow._lambda_client.get_function.assert_called_once_with(FunctionName="PhysicalFunction1")
+        sync_flow._lambda_client.update_function_code.assert_not_called()
+        wait_mock.assert_not_called()
+        sync_flow._get_lock_chain.assert_not_called()
+
+    @patch("samcli.lib.sync.flows.image_function_sync_flow.get_validated_container_client")
+    @patch("samcli.lib.sync.flows.function_sync_flow.wait_for_function_update_complete")
+    @patch("samcli.lib.sync.flows.image_function_sync_flow.ECRUploader")
+    @patch("samcli.lib.sync.sync_flow.Session")
+    def test_sync_context_image_repo_updates_when_push_happened_even_if_remote_image_matches(
+        self, session_mock, uploader_mock, wait_mock, mock_get_validated_client
+    ):
+        docker_client_mock = MagicMock()
+        mock_get_validated_client.return_value = docker_client_mock
+
+        sync_flow = self.create_function_sync_flow()
+        sync_flow._image_name = "ImageName1"
+
+        uploader_mock.return_value.upload.return_value = "repo_uri:mutable-tag"
+        uploader_mock.return_value.last_upload_skipped = False
+
+        sync_flow._get_lock_chain = MagicMock()
+        sync_flow.has_locks = MagicMock()
+
+        sync_flow.get_physical_id = MagicMock()
+        sync_flow.get_physical_id.return_value = "PhysicalFunction1"
+        sync_flow._deploy_context.image_repository = "repo_uri"
+
+        sync_flow.set_up()
+        sync_flow._lambda_client.get_function.return_value = {"Code": {"ImageUri": "repo_uri:mutable-tag"}}
+
+        sync_flow.sync()
+
+        sync_flow._lambda_client.get_function.assert_not_called()
+        sync_flow._lambda_client.update_function_code.assert_called_once_with(
+            FunctionName="PhysicalFunction1", ImageUri="repo_uri:mutable-tag"
+        )
+        wait_mock.assert_called_once_with(sync_flow._lambda_client, "PhysicalFunction1")
+
+    @patch("samcli.lib.sync.flows.image_function_sync_flow.get_validated_container_client")
+    @patch("samcli.lib.sync.flows.function_sync_flow.wait_for_function_update_complete")
+    @patch("samcli.lib.sync.flows.image_function_sync_flow.ECRUploader")
+    @patch("samcli.lib.sync.sync_flow.Session")
     def test_sync_context_image_repos(self, session_mock, uploader_mock, wait_mock, mock_get_validated_client):
         # Mock the docker client
         docker_client_mock = MagicMock()

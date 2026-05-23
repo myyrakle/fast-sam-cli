@@ -712,6 +712,8 @@ class AbstractBuildDefinition:
         self._manifest_hash = manifest_hash
         self._runtime_record = create_runtime_definition_record(self._uuid, source_hash, manifest_hash)
         self._env_vars = env_vars if env_vars else {}
+        self._env_vars_cache_json = None
+        self._env_vars_cache = None
         self._architecture = architecture
         # following properties are used during build time and they don't serialize into build.toml file
         self.download_dependencies: bool = True
@@ -753,7 +755,11 @@ class AbstractBuildDefinition:
     @property
     def env_vars(self) -> Dict:
         if self._runtime_record is not None and hasattr(self._runtime_record, "env_vars_json"):
-            return json.loads(self._runtime_record.env_vars_json)
+            env_vars_json = self._runtime_record.env_vars_json
+            if self._env_vars_cache_json != env_vars_json:
+                self._env_vars_cache_json = env_vars_json
+                self._env_vars_cache = json.loads(env_vars_json)
+            return deepcopy(self._env_vars_cache)
         return deepcopy(self._env_vars)
 
     @property
@@ -820,6 +826,8 @@ class LayerBuildDefinition(AbstractBuildDefinition):
         build_definition._source_hash = runtime_record.source_hash
         build_definition._manifest_hash = runtime_record.manifest_hash
         build_definition._env_vars = {}
+        build_definition._env_vars_cache_json = None
+        build_definition._env_vars_cache = None
         build_definition._architecture = runtime_record.architecture
         build_definition.download_dependencies = True
         build_definition._full_path = runtime_record.full_path
@@ -944,6 +952,8 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
             self._runtime_record = None
 
         self._metadata = metadata_copied
+        self._metadata_cache_json = None
+        self._metadata_cache = None
 
         self.functions: List[Function] = []
 
@@ -958,6 +968,8 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
         build_definition._source_hash = runtime_record.source_hash
         build_definition._manifest_hash = runtime_record.manifest_hash
         build_definition._env_vars = {}
+        build_definition._env_vars_cache_json = None
+        build_definition._env_vars_cache = None
         build_definition._architecture = runtime_record.architecture
         build_definition.download_dependencies = True
         build_definition._runtime = runtime_record.runtime
@@ -966,6 +978,8 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
         build_definition._packagetype = runtime_record.packagetype
         build_definition._handler = runtime_record.handler
         build_definition._metadata = {}
+        build_definition._metadata_cache_json = None
+        build_definition._metadata_cache = None
         build_definition.functions = []
         return build_definition
 
@@ -992,7 +1006,11 @@ class FunctionBuildDefinition(AbstractBuildDefinition):
     @property
     def metadata(self) -> Dict:
         if self._runtime_record is not None and hasattr(self._runtime_record, "metadata_json"):
-            return json.loads(self._runtime_record.metadata_json)
+            metadata_json = self._runtime_record.metadata_json
+            if self._metadata_cache_json != metadata_json:
+                self._metadata_cache_json = metadata_json
+                self._metadata_cache = json.loads(metadata_json)
+            return self._metadata_cache
         return self._metadata
 
     def add_function(self, function: Function) -> None:

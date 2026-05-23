@@ -11,11 +11,10 @@ import itertools
 import logging
 import re
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
-import jmespath
-from botocore.utils import set_value_from_jmespath
 
 from samcli.lib.cfn_language_extensions.models import (
     PACKAGEABLE_RESOURCE_ARTIFACT_PROPERTIES,
@@ -120,22 +119,51 @@ def generate_and_apply_artifact_mappings(
     return _apply_artifact_mappings_to_template(template, mappings, dynamic_properties, property_to_mapping)
 
 
-def _get_prop_value(props: Dict[str, Any], prop_name: str) -> Optional[Any]:
-    """Read a property by jmespath path. Supports flat keys ("CodeUri") and
-    dotted paths ("Command.ScriptLocation"). Returns None if missing.
+@lru_cache(maxsize=128)
+def _prop_path_segments(prop_name: str) -> Tuple[str, ...]:
+    """Return cached dotted-path segments for packageable artifact properties.
+
+    Packageable artifact paths come from ``samcli.lib.utils.resources`` and are
+    simple CloudFormation property names like ``CodeUri`` or dotted dict paths
+    like ``Command.ScriptLocation``. Avoiding jmespath here removes parser and
+    interpreter overhead from the language-extensions packaging hot path.
     """
-    return jmespath.search(prop_name, props)
+    return tuple(prop_name.split("."))
+
+
+def _get_prop_value(props: Dict[str, Any], prop_name: str) -> Optional[Any]:
+    """Read a packageable artifact property by simple dotted path.
+
+    Returns ``None`` if any intermediate value is missing or non-dict.
+    """
+    current: Any = props
+    for segment in _prop_path_segments(prop_name):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+        if current is None:
+            return None
+    return current
 
 
 def _set_prop_value(props: Dict[str, Any], prop_name: str, value: Any) -> None:
-    """Write a property by jmespath path. Creates intermediate dicts as needed.
-    Supports flat keys and dotted paths.
+    """Write a packageable artifact property by simple dotted path.
+
+    Creates intermediate dictionaries as needed.
     """
-    set_value_from_jmespath(props, prop_name, value)
+    current: Dict[str, Any] = props
+    segments = _prop_path_segments(prop_name)
+    for segment in segments[:-1]:
+        next_value = current.get(segment)
+        if not isinstance(next_value, dict):
+            next_value = {}
+            current[segment] = next_value
+        current = next_value
+    current[segments[-1]] = value
 
 
 def _leaf_prop_name(prop_name: str) -> str:
-    """Return the last segment of a jmespath property name.
+    """Return the last segment of a dotted property name.
 
     CloudFormation Mapping names must be alphanumeric, and the third argument of
     Fn::FindInMap and the keys of Mapping value-dicts must match each other as
@@ -522,7 +550,7 @@ def _find_artifact_uri_for_resource(
     Find the artifact URI for a specific resource and property from the exported resources.
 
     Handles all artifact property export formats (string URIs, {S3Bucket, S3Key},
-    {Bucket, Key}, {ImageUri}). ``property_name`` may be a jmespath dotted path
+    {Bucket, Key}, {ImageUri}). ``property_name`` may be a dotted path
     (e.g. "Command.ScriptLocation").
     """
     resource = exported_resources.get(resource_key)

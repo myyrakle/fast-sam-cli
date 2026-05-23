@@ -136,6 +136,19 @@ class ImageFunctionSyncFlow(FunctionSyncFlow):
     def compare_remote(self) -> bool:
         return False
 
+    @staticmethod
+    def _image_uri_from_function_result(function_result: Dict[str, Any]) -> str:
+        return function_result.get("Code", dict()).get("ImageUri", "")
+
+    def _best_effort_remote_image_uri(self, function_physical_id: str) -> str:
+        try:
+            return self._image_uri_from_function_result(
+                self._lambda_client.get_function(FunctionName=function_physical_id)
+            )
+        except Exception:  # noqa: BLE001 - this optional fast-path must not make sync less reliable
+            LOG.debug("%sUnable to read remote function image URI", self.log_prefix, exc_info=True)
+            return ""
+
     def sync(self) -> None:
         if not self._image_name:
             LOG.debug("%sSkipping sync. Image name is None.", self.log_prefix)
@@ -152,13 +165,24 @@ class ImageFunctionSyncFlow(FunctionSyncFlow):
         ):
             ecr_repo = self._deploy_context.image_repositories.get(self._function_identifier)
 
+        remote_image_uri = ""
+
         # Load ECR Repo directly from remote function
         if not ecr_repo:
             LOG.debug("%sGetting ECR Repo from Remote Function", self.log_prefix)
             function_result = self._lambda_client.get_function(FunctionName=function_physical_id)
-            ecr_repo = function_result.get("Code", dict()).get("ImageUri", "").split(":")[0]
+            remote_image_uri = self._image_uri_from_function_result(function_result)
+            ecr_repo = remote_image_uri.split(":")[0]
         ecr_uploader = ECRUploader(self._get_docker_client(), self._get_ecr_client(), ecr_repo, None)
         image_uri = ecr_uploader.upload(self._image_name, self._function_identifier)
+
+        if ecr_uploader.last_upload_skipped is True:
+            if not remote_image_uri:
+                remote_image_uri = self._best_effort_remote_image_uri(function_physical_id)
+
+            if remote_image_uri == image_uri:
+                LOG.info("%sRemote function already uses image %s, skipping update", self.log_prefix, image_uri)
+                return
 
         update_params = FunctionUpdateParams(FunctionName=function_physical_id, ImageUri=image_uri)
 

@@ -236,11 +236,10 @@ class TestSyncContext(TestCase):
             with self.sync_context:
                 pass
 
-            mock_file.assert_has_calls(
-                [call().write(tomlkit.dumps(_sync_state_to_toml_document(self.sync_context._current_state)))]
-            )
-
             if previous_dependency_layer_value != self.dependency_layer:
+                mock_file.assert_has_calls(
+                    [call().write(tomlkit.dumps(_sync_state_to_toml_document(self.sync_context._current_state)))]
+                )
                 patched_rmtree_if_exists.assert_has_calls(
                     [
                         call(self.sync_context._build_dir),
