@@ -74,6 +74,18 @@ class TestFunctionSyncFlow(TestCase):
         self.assertEqual(result, [alias_version_mock.return_value])
 
     @patch.multiple(FunctionSyncFlow, __abstractmethods__=set())
+    def test_gather_dependencies_skips_waiter_without_auto_publish_alias(self):
+        sync_flow = self.create_function_sync_flow()
+        sync_flow.get_physical_id = Mock(return_value="PhysicalFunction1")
+        sync_flow._get_resource = Mock(return_value={"Properties": {}})
+
+        result = sync_flow.gather_dependencies()
+
+        sync_flow._lambda_waiter.wait.assert_not_called()
+        sync_flow.get_physical_id.assert_not_called()
+        self.assertEqual(result, [])
+
+    @patch.multiple(FunctionSyncFlow, __abstractmethods__=set())
     def test_equality_keys(self):
         sync_flow = self.create_function_sync_flow()
         self.assertEqual(sync_flow._equality_keys(), "Function1")
@@ -108,7 +120,12 @@ class TestFunctionSyncFlow(TestCase):
         call_args = sync_flow._lambda_client.publish_version.call_args
         self.assertEqual(call_args.kwargs.get("PublishTo"), "LATEST_PUBLISHED")
 
-        wait_mock.assert_called_once_with(sync_flow._lambda_client, function_physical_id, response_version)
+        wait_mock.assert_called_once_with(
+            sync_flow._lambda_client,
+            function_physical_id,
+            response_version,
+            initial_response={"Version": response_version},
+        )
 
     @parameterized.expand(
         [
@@ -156,7 +173,9 @@ class TestFunctionSyncFlow(TestCase):
         self.lambda_client_mock.update_function_code.assert_called_once_with(**expected_params)
 
         # Check wait was called
-        wait_mock.assert_called_once_with(self.lambda_client_mock, function_physical_id)
+        wait_mock.assert_called_once_with(
+            self.lambda_client_mock, function_physical_id, initial_response={"FunctionName": function_physical_id}
+        )
 
     @parameterized.expand(
         [

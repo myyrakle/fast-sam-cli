@@ -777,6 +777,63 @@ class TestSyncCode(TestCase):
 
         get_all_resource_ids_mock.assert_called_once_with(get_stacks_mock.return_value[0])
 
+    @patch("samcli.commands.sync.command.ApplicationBuilder")
+    @patch("samcli.commands.sync.command.SamLocalStackProvider.get_stacks")
+    @patch("samcli.commands.sync.command.SyncFlowFactory")
+    @patch("samcli.commands.sync.command.SyncFlowExecutor")
+    @patch("samcli.commands.sync.command.get_unique_resource_ids")
+    def test_execute_code_sync_prebuilds_selected_buildable_resources_once(
+        self,
+        get_unique_resource_ids_mock,
+        sync_flow_executor_mock,
+        sync_flow_factory_mock,
+        get_stacks_mock,
+        application_builder_mock,
+    ):
+        function = Mock()
+        function.full_path = "Function1"
+        function.function_build_info.is_buildable.return_value = True
+        layer = Mock()
+        layer.full_path = "Layer1"
+        self.build_context.function_provider.get.side_effect = lambda resource_id: function if resource_id == "Function1" else None
+        self.build_context.layer_provider.get.side_effect = lambda resource_id: layer if resource_id == "Layer1" else None
+        self.build_context.is_layer_buildable.return_value = True
+
+        function_resources = Mock(functions=[function], layers=[layer])
+        layer_resources = Mock(functions=[], layers=[layer])
+        self.build_context.collect_build_resources.side_effect = lambda resource_id: (
+            function_resources if resource_id == "Function1" else layer_resources
+        )
+        self.build_context.create_auto_dependency_layer = False
+
+        build_result = Mock()
+        application_builder_mock.return_value.build.return_value = build_result
+        sync_flows = [MagicMock(), MagicMock()]
+        sync_flow_factory_mock.return_value.create_sync_flow.side_effect = sync_flows
+        get_unique_resource_ids_mock.return_value = {
+            ResourceIdentifier("Function1"),
+            ResourceIdentifier("Layer1"),
+        }
+
+        execute_code_sync(
+            self.template_file,
+            self.build_context,
+            self.deploy_context,
+            self.sync_context,
+            ["Function1", "Layer1"],
+            [],
+            True,
+            use_built_resources=False,
+        )
+
+        application_builder_mock.assert_called_once()
+        prebuilt_resources = application_builder_mock.call_args.args[0]
+        self.assertEqual(prebuilt_resources.functions, [function])
+        self.assertEqual(prebuilt_resources.layers, [layer])
+        application_builder_mock.return_value.build.assert_called_once()
+        sync_flow_factory_mock.return_value.create_sync_flow.assert_any_call(ResourceIdentifier("Function1"), build_result)
+        sync_flow_factory_mock.return_value.create_sync_flow.assert_any_call(ResourceIdentifier("Layer1"), build_result)
+
 
 class TestWatch(TestCase):
     def setUp(self) -> None:

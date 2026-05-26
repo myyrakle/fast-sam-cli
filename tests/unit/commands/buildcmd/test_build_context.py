@@ -1328,6 +1328,29 @@ class TestBuildContext_is_sam_template(TestCase):
         result = build_context._is_sam_template()
         self.assertEqual(result, expected_result)
 
+    @patch("samcli.commands.build.build_context.get_template_data")
+    @patch("samcli.commands.build.build_context.SamLocalStackProvider.find_root_stack")
+    def test_is_sam_template_reuses_loaded_root_stack_template(self, find_root_stack_mock, get_template_data_mock):
+        root_stack = Mock()
+        root_stack.template_dict = {"Transform": "AWS::Serverless-2016-10-31"}
+        find_root_stack_mock.return_value = root_stack
+
+        build_context = BuildContext(
+            resource_identifier="",
+            template_file="template_file",
+            base_dir="base_dir",
+            build_dir="build_dir",
+            cache_dir="cache_dir",
+            cached=False,
+            clean=False,
+            parallel=False,
+            mode="mode",
+        )
+        build_context._stacks = [root_stack]
+
+        self.assertTrue(build_context._is_sam_template())
+        get_template_data_mock.assert_not_called()
+
 
 class TestBuildContext_exclude_warning(TestCase):
     @parameterized.expand(

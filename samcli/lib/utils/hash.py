@@ -21,6 +21,22 @@ def _get_md5():
         return hashlib.md5()
 
 
+def _native_md5_file_checksum(file_name: str) -> Optional[str]:
+    try:
+        from samcli.lib.build.rust_backend import md5_file_checksum
+    except ImportError:
+        return None
+    return md5_file_checksum(file_name)
+
+
+def _native_md5_dir_checksum(directory: str, ignore_list: Optional[List[str]]) -> Optional[str]:
+    try:
+        from samcli.lib.build.rust_backend import md5_dir_checksum
+    except ImportError:
+        return None
+    return md5_dir_checksum(directory, ignore_list or [])
+
+
 def file_checksum(file_name: str, hash_generator: Any = None) -> str:
     """
 
@@ -36,8 +52,13 @@ def file_checksum(file_name: str, hash_generator: Any = None) -> str:
     checksum of the given file.
 
     """
-    # Default value is set here because default values are static mutable in Python
-    if not hash_generator:
+    # Default value is set here because default values are static mutable in Python.
+    # Keep custom hash generators on the Python path because callers expect the
+    # supplied object to be updated in-place.
+    if hash_generator is None:
+        native_hash = _native_md5_file_checksum(file_name)
+        if native_hash is not None:
+            return native_hash
         hash_generator = _get_md5()
     with open(file_name, "rb") as file_handle:
         # Save current cursor position and reset cursor to start of file
@@ -77,6 +98,12 @@ def dir_checksum(
 
     """
     ignore_set = set(ignore_list or [])
+    # The Rust fast path intentionally only handles the default MD5/followlinks=True
+    # contract. Custom generators and followlinks=False retain exact Python semantics.
+    if hash_generator is None and followlinks is True:
+        native_hash = _native_md5_dir_checksum(directory, ignore_list)
+        if native_hash is not None:
+            return native_hash
     if not hash_generator:
         hash_generator = _get_md5()
     files = list()

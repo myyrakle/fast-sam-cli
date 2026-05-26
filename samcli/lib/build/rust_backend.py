@@ -78,6 +78,19 @@ def sha256_dir_checksum(directory: str, ignore_list: Optional[List[str]] = None)
         return None
 
 
+def md5_dir_checksum(directory: str, ignore_list: Optional[List[str]] = None) -> Optional[str]:
+    """Calculate a source tree MD5 checksum through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "md5_dir_checksum", None)
+    if native_fn is None:
+        return None
+    try:
+        return str(native_fn(os.fspath(directory), ignore_list or []))
+    except (OSError, TypeError):
+        return None
+
+
 def create_runtime_definition_record(uuid: str, source_hash: str, manifest_hash: str) -> Optional[Any]:
     """Create a Rust-owned mutable persisted-state record when enabled."""
     if not is_enabled():
@@ -597,6 +610,35 @@ def remove_redundant_folders(base_dir: str, retained_uuids: List[str]) -> Option
         return None
 
 
+def create_package_zip(output_base_path: str, source_root: str, lambda_permissions: bool = False) -> Optional[str]:
+    """Create a package ZIP through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "create_package_zip", None)
+    if native_fn is None:
+        return None
+    try:
+        return str(native_fn(os.fspath(output_base_path), os.fspath(source_root), lambda_permissions))
+    except (OSError, TypeError):
+        return None
+
+
+def create_package_zip_with_md5(
+    output_base_path: str, source_root: str, lambda_permissions: bool = False
+) -> Optional[tuple[str, str]]:
+    """Create a package ZIP and source-tree MD5 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "create_package_zip_with_md5", None)
+    if native_fn is None:
+        return None
+    try:
+        zip_path, md5_hash = native_fn(os.fspath(output_base_path), os.fspath(source_root), lambda_permissions)
+    except (OSError, TypeError):
+        return None
+    return str(zip_path), str(md5_hash)
+
+
 def create_lambda_zip_with_sha256(output_base_path: str, source_root: str) -> Optional[tuple[str, str]]:
     """Create a deterministic Lambda ZIP and its SHA256 through Rust when enabled."""
     if not is_enabled():
@@ -616,6 +658,19 @@ def sha256_file_checksum(path: str) -> Optional[str]:
     if not is_enabled():
         return None
     native_fn = getattr(_native, "sha256_file_checksum", None)
+    if native_fn is None:
+        return None
+    try:
+        return str(native_fn(os.fspath(path)))
+    except (OSError, TypeError):
+        return None
+
+
+def md5_file_checksum(path: str) -> Optional[str]:
+    """Calculate a file MD5 through Rust when enabled."""
+    if not is_enabled():
+        return None
+    native_fn = getattr(_native, "md5_file_checksum", None)
     if native_fn is None:
         return None
     try:

@@ -2,7 +2,6 @@
 Class that Normalizes a Template based on Resource Metadata
 """
 
-import json
 import logging
 import re
 from copy import deepcopy
@@ -117,12 +116,9 @@ class ResourceMetadataNormalizer:
         # package commands without providing values for the auto generated parameters, as these parameters are not used
         # in SAM (sam set the resources paths directly, and does not depend on template parameters)
         if normalize_parameters and is_cdk_project(template_dict):
-            resources_copy = {
-                logical_id: resource
-                for logical_id, resource in resources.items()
-                if resource.get("Type", "") != AWS_CLOUDFORMATION_STACK
-            }
-            resources_as_string = json.dumps(resources_copy)
+            resources_without_nested_stacks = [
+                resource for resource in resources.values() if resource.get("Type", "") != AWS_CLOUDFORMATION_STACK
+            ]
             parameters = template_dict.get("Parameters", {})
 
             default_value = " "
@@ -132,10 +128,25 @@ class ResourceMetadataNormalizer:
                     parameter_name_match
                     and "Default" not in parameter_value
                     and parameter_value.get("Type", "") == "String"
-                    and f'"Ref": "{parameter_name}"' not in resources_as_string
+                    and not ResourceMetadataNormalizer._resources_contain_ref(
+                        resources_without_nested_stacks, parameter_name
+                    )
                 ):
                     LOG.debug("set default value for parameter %s to '%s'", parameter_name, default_value)
                     parameter_value["Default"] = default_value
+
+    @staticmethod
+    def _resources_contain_ref(resources, parameter_name):
+        stack = list(resources)
+        while stack:
+            value = stack.pop()
+            if isinstance(value, dict):
+                if value.get("Ref") == parameter_name:
+                    return True
+                stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        return False
 
     @staticmethod
     def _replace_property(property_key, property_value, resource, logical_id):

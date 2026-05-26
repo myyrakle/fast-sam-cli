@@ -4,6 +4,7 @@ Client for uploading packaged artifacts to ecr
 
 import base64
 import logging
+import threading
 from io import StringIO
 from pathlib import Path
 from typing import Dict
@@ -28,6 +29,31 @@ from samcli.local.docker.utils import get_validated_container_client
 LOG = logging.getLogger(__name__)
 
 ECR_USERNAME = "AWS"
+_AUTH_CONFIG_CACHE: Dict[str, Dict[str, str]] = {}
+_AUTH_CONFIG_CACHE_LOCK = threading.Lock()
+_IMAGE_UPLOAD_LOCKS: Dict[str, threading.Lock] = {}
+_IMAGE_UPLOAD_LOCKS_LOCK = threading.Lock()
+
+
+def _registry_cache_key(registry: str) -> str:
+    return registry.removeprefix("https://").removeprefix("http://").rstrip("/")
+
+
+def _repository_registry(repository: str) -> str:
+    return repository.split("/", 1)[0]
+
+
+def _remote_image_uri(repository: str, tag: str) -> str:
+    return f"{repository}:{tag}"
+
+
+def _image_upload_lock(image_uri: str) -> threading.Lock:
+    with _IMAGE_UPLOAD_LOCKS_LOCK:
+        lock = _IMAGE_UPLOAD_LOCKS.get(image_uri)
+        if lock is None:
+            lock = threading.Lock()
+            _IMAGE_UPLOAD_LOCKS[image_uri] = lock
+        return lock
 
 
 class ECRUploader:
@@ -50,35 +76,83 @@ class ECRUploader:
         self.stream = StreamWriter(stream=stream, auto_flush=True)
         self.log_streamer = LogStreamer(stream=self.stream)
         self.login_session_active = False
+        self.last_upload_skipped = False
+        self._docker_client_lock = threading.Lock()
+        self._login_lock = threading.Lock()
 
     @property
     def docker_client(self):
         """Lazy initialization of Docker client - only validates when ECR operations are needed."""
         if self._validated_docker_client is None:
-            if self._docker_client_param is None:
-                # Only validate Docker client when ECR operations are actually needed
-                self._validated_docker_client = get_validated_container_client()
-            else:
-                self._validated_docker_client = self._docker_client_param
+            with self._docker_client_lock:
+                if self._validated_docker_client is None:
+                    if self._docker_client_param is None:
+                        # Only validate Docker client when ECR operations are actually needed
+                        self._validated_docker_client = get_validated_container_client()
+                    else:
+                        self._validated_docker_client = self._docker_client_param
         return self._validated_docker_client
 
-    def login(self):
+    def login(self, registry_hint: str = ""):
         """
         Logs into the supplied ECR with credentials.
         """
-        try:
-            token = self.ecr_client.get_authorization_token()
-        except botocore.exceptions.ClientError as ex:
-            raise ECRAuthorizationError(msg=ex.response["Error"]["Message"]) from ex
+        registry_hint_key = _registry_cache_key(registry_hint) if registry_hint else ""
+        with _AUTH_CONFIG_CACHE_LOCK:
+            if registry_hint_key and registry_hint_key in _AUTH_CONFIG_CACHE:
+                self.auth_config = dict(_AUTH_CONFIG_CACHE[registry_hint_key])
+                return
 
-        username, password = base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":")
-        registry = token["authorizationData"][0]["proxyEndpoint"]
+            try:
+                token = self.ecr_client.get_authorization_token()
+            except botocore.exceptions.ClientError as ex:
+                raise ECRAuthorizationError(msg=ex.response["Error"]["Message"]) from ex
 
+            username, password = (
+                base64.b64decode(token["authorizationData"][0]["authorizationToken"]).decode().split(":")
+            )
+            registry = token["authorizationData"][0]["proxyEndpoint"]
+            registry_key = _registry_cache_key(registry)
+
+            try:
+                self.docker_client.login(username=ECR_USERNAME, password=password, registry=registry)
+            except APIError as ex:
+                raise DockerLoginFailedError(msg=str(ex)) from ex
+            self.auth_config = {"username": username, "password": password}
+            _AUTH_CONFIG_CACHE[registry_key] = dict(self.auth_config)
+
+    def _remote_image_exists(self, image_uri: str) -> bool:
+        """Return True when ECR already contains image_uri's tag."""
         try:
-            self.docker_client.login(username=ECR_USERNAME, password=password, registry=registry)
-        except APIError as ex:
-            raise DockerLoginFailedError(msg=str(ex)) from ex
-        self.auth_config = {"username": username, "password": password}
+            parsed_image = self.parse_image_url(image_uri)
+            response = self.ecr_client.batch_get_image(
+                repositoryName=parsed_image["repository"],
+                imageIds=[{"imageTag": parsed_image["image_tag"]}],
+            )
+        except botocore.exceptions.ClientError:
+            LOG.debug("Unable to check whether ECR image %s already exists", image_uri, exc_info=True)
+            return False
+
+        return bool(isinstance(response, dict) and response.get("images"))
+
+    def _push_image(self, repository, tag: str, docker_img) -> None:
+        if not self.login_session_active:
+            with self._login_lock:
+                if not self.login_session_active:
+                    self.login(_repository_registry(repository) if isinstance(repository, str) else "")
+                    self.login_session_active = True
+
+        docker_img.tag(repository=repository, tag=tag)
+        push_logs = self.docker_client.api.push(
+            repository=repository, tag=tag, auth_config=self.auth_config, stream=True, decode=True
+        )
+        if not self.no_progressbar:
+            LogStreamer(stream=self.stream).stream_progress(push_logs)
+        else:
+            # we need to wait till the image got pushed to ecr, without this workaround sam sync for template
+            # contains image always fail, because the provided ecr uri is not exist.
+            _log_streamer = LogStreamer(stream=StreamWriter(stream=StringIO(), auto_flush=True))
+            _log_streamer.stream_progress(push_logs)
 
     def upload(self, image, resource_name):
         """
@@ -87,13 +161,10 @@ class ECRUploader:
         :param resource_name: logical ID of the resource to be uploaded to ECR.
         :return: remote ECR image path that has been uploaded.
         """
-        if not self.login_session_active:
-            self.login()
-            self.login_session_active = True
-
         # Sometimes the `resource_name` is used as the `image` parameter to `tag_translation`.
         # This is because these two cases (directly from an archive or by ID) are effectively
         # anonymous, so the best identifier available in scope is the resource name.
+        self.last_upload_skipped = False
         try:
             if Path(image).is_file():
                 with open(image, mode="rb") as image_archive:
@@ -113,23 +184,23 @@ class ECRUploader:
                 if not self.ecr_repo_multi or not isinstance(self.ecr_repo_multi, dict)
                 else self.ecr_repo_multi.get(resource_name)
             )
+            remote_image_uri = _remote_image_uri(repository, _tag)
 
-            docker_img.tag(repository=repository, tag=_tag)
-            push_logs = self.docker_client.api.push(
-                repository=repository, tag=_tag, auth_config=self.auth_config, stream=True, decode=True
-            )
-            if not self.no_progressbar:
-                self.log_streamer.stream_progress(push_logs)
+            if isinstance(repository, str):
+                with _image_upload_lock(remote_image_uri):
+                    if self._remote_image_exists(remote_image_uri):
+                        LOG.info("Image %s already exists in ECR, skipping push", remote_image_uri)
+                        self.last_upload_skipped = True
+                        return remote_image_uri
+
+                    self._push_image(repository, _tag, docker_img)
             else:
-                # we need to wait till the image got pushed to ecr, without this workaround sam sync for template
-                # contains image always fail, because the provided ecr uri is not exist.
-                _log_streamer = LogStreamer(stream=StreamWriter(stream=StringIO(), auto_flush=True))
-                _log_streamer.stream_progress(push_logs)
+                self._push_image(repository, _tag, docker_img)
 
         except (BuildError, APIError, LogStreamError, ContainerArchiveImageLoadFailedException) as ex:
             raise DockerPushFailedError(msg=str(ex)) from ex
 
-        return f"{repository}:{_tag}"
+        return remote_image_uri
 
     def delete_artifact(self, image_uri: str, resource_id: str, property_name: str):
         """

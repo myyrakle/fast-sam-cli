@@ -558,6 +558,34 @@ class TestInfraSyncExecutor(TestCase):
             expect_skip_infra_sync,
         )
 
+    @patch("samcli.lib.sync.infra_sync_executor.Session")
+    def test_param_overrides_empty_skips_describe_stacks(self, session_mock):
+        infra_sync_executor = InfraSyncExecutor(
+            self.build_context, self.package_context, self.deploy_context, self.sync_context
+        )
+
+        self.assertTrue(infra_sync_executor._param_overrides_subset_of_stack_params("stack_name", {}))
+        infra_sync_executor._cfn_client.describe_stacks.assert_not_called()
+
+    @patch("samcli.lib.sync.infra_sync_executor.Session")
+    def test_get_stack_parameters_uses_cache(self, session_mock):
+        infra_sync_executor = InfraSyncExecutor(
+            self.build_context, self.package_context, self.deploy_context, self.sync_context
+        )
+        infra_sync_executor._cfn_client.describe_stacks.return_value = {
+            "Stacks": [{"Parameters": [{"ParameterKey": "Foo", "ParameterValue": "Bar"}]}]
+        }
+
+        self.assertEqual(
+            infra_sync_executor._get_stack_parameters("stack_name"),
+            [{"ParameterKey": "Foo", "ParameterValue": "Bar"}],
+        )
+        self.assertEqual(
+            infra_sync_executor._get_stack_parameters("stack_name"),
+            [{"ParameterKey": "Foo", "ParameterValue": "Bar"}],
+        )
+        infra_sync_executor._cfn_client.describe_stacks.assert_called_once_with(StackName="stack_name")
+
     @patch("samcli.lib.sync.infra_sync_executor.is_local_path")
     @patch("samcli.lib.sync.infra_sync_executor.Session")
     def test_sanitize_template(self, session_mock, local_path_mock):
@@ -905,8 +933,10 @@ class TestInfraSyncExecutor(TestCase):
         )
 
         infra_sync_executor.get_template("local")
+        infra_sync_executor.get_template("local")
         get_template_mock.assert_called_once_with("local")
 
+        infra_sync_executor.get_template("https://s3.com/key/value")
         infra_sync_executor.get_template("https://s3.com/key/value")
         get_remote_template_mock.assert_called_once_with("https://s3.com/key/value")
 

@@ -22,7 +22,9 @@ impl ResourceTypeIndex {
 
         for row in &self.rows {
             if row.stack_path == stack_path || search_all_stacks {
-                if row.resource_id == resource_iac_id || (stack_path.is_empty() && row.logical_id == resource_iac_id) {
+                if row.resource_id == resource_iac_id
+                    || (stack_path.is_empty() && row.logical_id == resource_iac_id)
+                {
                     return row.resource_type.clone();
                 }
             }
@@ -32,11 +34,17 @@ impl ResourceTypeIndex {
     }
 }
 
-pub fn dependent_function_ids(layer_identifier: &str, function_layer_rows: Vec<(String, Vec<String>)>) -> Vec<String> {
+pub fn dependent_function_ids(
+    layer_identifier: &str,
+    function_layer_rows: Vec<(String, Vec<String>)>,
+) -> Vec<String> {
     function_layer_rows
         .into_iter()
         .filter_map(|(function_id, layer_ids)| {
-            if layer_ids.iter().any(|layer_id| layer_id == layer_identifier) {
+            if layer_ids
+                .iter()
+                .any(|layer_id| layer_id == layer_identifier)
+            {
                 Some(function_id)
             } else {
                 None
@@ -53,7 +61,11 @@ pub fn function_resource_api_call_rows(
 ) -> Vec<(String, Vec<String>)> {
     let mut rows = Vec::new();
 
-    rows.extend(layer_ids.into_iter().map(|layer_id| (layer_id, vec!["Build".to_string()])));
+    rows.extend(
+        layer_ids
+            .into_iter()
+            .map(|layer_id| (layer_id, vec!["Build".to_string()])),
+    );
 
     if let Some(codeuri) = codeuri {
         if !codeuri.is_empty() {
@@ -73,7 +85,9 @@ pub fn function_resource_api_call_rows(
     rows
 }
 
-pub fn lock_keys_from_api_call_rows(resource_api_call_rows: Vec<(String, Vec<String>)>) -> Vec<String> {
+pub fn lock_keys_from_api_call_rows(
+    resource_api_call_rows: Vec<(String, Vec<String>)>,
+) -> Vec<String> {
     let mut lock_keys = Vec::new();
 
     for (resource, api_calls) in resource_api_call_rows {
@@ -113,7 +127,10 @@ pub fn collect_rest_api_stage_names(
         let Some(rest_api_id) = rest_api_id else {
             continue;
         };
-        if rest_api_id == api_identifier && deployment_resource_ids.iter().any(|resource_id| resource_id == &deployment_id)
+        if rest_api_id == api_identifier
+            && deployment_resource_ids
+                .iter()
+                .any(|resource_id| resource_id == &deployment_id)
         {
             if let Some(stage_name) = stage_name {
                 push_unique(&mut stages, stage_name);
@@ -126,7 +143,9 @@ pub fn collect_rest_api_stage_names(
 
 pub fn local_hash_matches(local_hash: Option<&str>, stored_hash: Option<&str>) -> bool {
     match (local_hash, stored_hash) {
-        (Some(local_hash), Some(stored_hash)) if !local_hash.is_empty() && !stored_hash.is_empty() => {
+        (Some(local_hash), Some(stored_hash))
+            if !local_hash.is_empty() && !stored_hash.is_empty() =>
+        {
             local_hash == stored_hash
         }
         _ => false,
@@ -139,7 +158,10 @@ pub struct SyncExecutionDecision {
     pub sync: bool,
 }
 
-pub fn sync_execution_decision(local_matches: bool, remote_matches: Option<bool>) -> SyncExecutionDecision {
+pub fn sync_execution_decision(
+    local_matches: bool,
+    remote_matches: Option<bool>,
+) -> SyncExecutionDecision {
     if local_matches {
         return SyncExecutionDecision {
             compare_remote: false,
@@ -178,8 +200,9 @@ fn parse_resource_identifier(resource_identifier: &str) -> (&str, &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_rest_api_stage_names, dependent_function_ids, function_resource_api_call_rows, local_hash_matches,
-        lock_keys_from_api_call_rows, sync_execution_decision, SyncExecutionDecision,
+        collect_rest_api_stage_names, dependent_function_ids, function_resource_api_call_rows,
+        local_hash_matches, lock_keys_from_api_call_rows, sync_execution_decision,
+        SyncExecutionDecision,
     };
     use super::{ResourceTypeIndex, ResourceTypeRow};
 
@@ -215,8 +238,14 @@ mod tests {
             },
         ]);
 
-        assert_eq!(index.get_resource_type("Child/ChildId").as_deref(), Some("ChildType"));
-        assert_eq!(index.get_resource_type("SharedId").as_deref(), Some("RootType"));
+        assert_eq!(
+            index.get_resource_type("Child/ChildId").as_deref(),
+            Some("ChildType")
+        );
+        assert_eq!(
+            index.get_resource_type("SharedId").as_deref(),
+            Some("RootType")
+        );
     }
 
     #[test]
@@ -281,7 +310,10 @@ mod tests {
                 ("Layer".into(), vec!["Build".into()]),
                 (
                     "Function".into(),
-                    vec!["UpdateFunctionCode".into(), "UpdateFunctionConfiguration".into()],
+                    vec![
+                        "UpdateFunctionCode".into(),
+                        "UpdateFunctionConfiguration".into()
+                    ],
                 ),
             ]),
             vec![
@@ -301,8 +333,16 @@ mod tests {
                 Some("beta".into()),
                 vec!["Stage".into()],
                 vec![
-                    (Some("prod".into()), Some("Api1".into()), Some("Deployment1".into())),
-                    (Some("other".into()), Some("OtherApi".into()), Some("Deployment1".into())),
+                    (
+                        Some("prod".into()),
+                        Some("Api1".into()),
+                        Some("Deployment1".into())
+                    ),
+                    (
+                        Some("other".into()),
+                        Some("OtherApi".into()),
+                        Some("Deployment1".into())
+                    ),
                 ],
                 vec!["Deployment1".into()],
             ),

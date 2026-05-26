@@ -359,7 +359,8 @@ class BuildContext:
 
     def _is_sam_template(self) -> bool:
         """Check if a given template is a SAM template"""
-        template_dict = get_template_data(self._template_file)
+        root_stack = SamLocalStackProvider.find_root_stack(self.stacks) if self.stacks else None
+        template_dict = root_stack.template_dict if root_stack else get_template_data(self._template_file)
         template_transforms = template_dict.get("Transform", [])
         if not isinstance(template_transforms, list):
             template_transforms = [template_transforms]
@@ -1102,6 +1103,30 @@ Commands you can use next
     @property
     def mode(self) -> Optional[str]:
         return self._mode
+
+    @property
+    def container_env_var(self) -> Optional[dict]:
+        return self._container_env_var
+
+    @property
+    def container_env_var_file(self) -> Optional[str]:
+        return self._container_env_var_file
+
+    @property
+    def build_images(self) -> Optional[dict]:
+        return self._build_images
+
+    @property
+    def mount_with_write(self) -> bool:
+        return self._mount_with == MountMode.WRITE
+
+    @property
+    def mount_symlinks(self) -> Optional[bool]:
+        return self._mount_symlinks
+
+    @property
+    def use_buildkit(self) -> Optional[bool]:
+        return self._use_buildkit
 
     @property
     def use_base_dir(self) -> bool:

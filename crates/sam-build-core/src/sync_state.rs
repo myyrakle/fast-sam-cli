@@ -94,9 +94,13 @@ fn parse_timestamp(value: &toml::Value) -> Option<f64> {
     match value {
         toml::Value::Integer(value) => Some(*value as f64),
         toml::Value::Float(value) => Some(*value),
-        toml::Value::Datetime(value) => OffsetDateTime::parse(&value.to_string(), &Iso8601::DEFAULT)
-            .ok()
-            .map(|value| value.unix_timestamp() as f64 + value.nanosecond() as f64 / 1_000_000_000.0),
+        toml::Value::Datetime(value) => {
+            OffsetDateTime::parse(&value.to_string(), &Iso8601::DEFAULT)
+                .ok()
+                .map(|value| {
+                    value.unix_timestamp() as f64 + value.nanosecond() as f64 / 1_000_000_000.0
+                })
+        }
         toml::Value::String(value) => {
             let normalized = if value.ends_with('Z') {
                 value.clone()
@@ -107,7 +111,9 @@ fn parse_timestamp(value: &toml::Value) -> Option<f64> {
             };
             OffsetDateTime::parse(&normalized, &Iso8601::DEFAULT)
                 .ok()
-                .map(|value| value.unix_timestamp() as f64 + value.nanosecond() as f64 / 1_000_000_000.0)
+                .map(|value| {
+                    value.unix_timestamp() as f64 + value.nanosecond() as f64 / 1_000_000_000.0
+                })
         }
         _ => None,
     }

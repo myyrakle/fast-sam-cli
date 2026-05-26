@@ -211,6 +211,16 @@ class TestSyncContext(TestCase):
     skip_deploy_sync: bool
 
     def setUp(self) -> None:
+        rust_fast_path_patches = [
+            patch("samcli.commands.sync.sync_context.rust_read_runtime_sync_state", return_value=None),
+            patch("samcli.commands.sync.sync_context.rust_read_sync_state_compact", return_value=None),
+            patch("samcli.commands.sync.sync_context.rust_create_runtime_sync_state", return_value=None),
+            patch("samcli.commands.sync.sync_context.rust_write_sync_state_compact", return_value=False),
+        ]
+        for patcher in rust_fast_path_patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
         self.build_dir = "build_dir"
         self.cache_dir = "cache_dir"
         self.sync_context = SyncContext(self.dependency_layer, self.build_dir, self.cache_dir, self.skip_deploy_sync)
@@ -226,11 +236,10 @@ class TestSyncContext(TestCase):
             with self.sync_context:
                 pass
 
-            mock_file.assert_has_calls(
-                [call().write(tomlkit.dumps(_sync_state_to_toml_document(self.sync_context._current_state)))]
-            )
-
             if previous_dependency_layer_value != self.dependency_layer:
+                mock_file.assert_has_calls(
+                    [call().write(tomlkit.dumps(_sync_state_to_toml_document(self.sync_context._current_state)))]
+                )
                 patched_rmtree_if_exists.assert_has_calls(
                     [
                         call(self.sync_context._build_dir),

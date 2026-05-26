@@ -57,6 +57,14 @@ class TestRustBackend(TestCase):
             self.assertEqual(rust_backend.sha256_dir_checksum("src", [".aws-sam"]), "checksum")
         native.sha256_dir_checksum.assert_called_once_with("src", [".aws-sam"])
 
+    @patch.dict("os.environ", {rust_backend.RUST_BUILD_CORE_ENV_VAR: "1"}, clear=True)
+    def test_md5_checksum_uses_native_module_when_enabled(self):
+        native = Mock()
+        native.md5_dir_checksum.return_value = "checksum"
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.md5_dir_checksum("src", [".aws-sam"]), "checksum")
+        native.md5_dir_checksum.assert_called_once_with("src", [".aws-sam"])
+
     @patch.dict("os.environ", {}, clear=True)
     def test_sha256_checksum_falls_back_when_native_path_is_unavailable(self):
         native = Mock()
@@ -486,6 +494,35 @@ class TestRustBackend(TestCase):
         native.remove_redundant_folders.assert_not_called()
 
     @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_returns_native_artifact(self):
+        native = Mock()
+        native.create_package_zip.return_value = "artifact.zip"
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.create_package_zip(Path("artifact"), Path("src"), True), "artifact.zip")
+        native.create_package_zip.assert_called_once_with("artifact", "src", True)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.create_package_zip("artifact", "src", False))
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_with_md5_returns_native_artifact(self):
+        native = Mock()
+        native.create_package_zip_with_md5.return_value = ("artifact.zip", "md5")
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(
+                rust_backend.create_package_zip_with_md5(Path("artifact"), Path("src"), True),
+                ("artifact.zip", "md5"),
+            )
+        native.create_package_zip_with_md5.assert_called_once_with("artifact", "src", True)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_create_package_zip_with_md5_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.create_package_zip_with_md5("artifact", "src", False))
+
+    @patch.dict("os.environ", {}, clear=True)
     def test_create_lambda_zip_with_sha256_returns_native_artifact(self):
         native = Mock()
         native.create_lambda_zip_with_sha256.return_value = ("artifact.zip", "sha256")
@@ -513,6 +550,19 @@ class TestRustBackend(TestCase):
     def test_sha256_file_checksum_returns_none_when_native_api_is_unavailable(self):
         with patch.object(rust_backend, "_native", object()):
             self.assertIsNone(rust_backend.sha256_file_checksum("artifact.zip"))
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_md5_file_checksum_returns_native_hash(self):
+        native = Mock()
+        native.md5_file_checksum.return_value = "md5"
+        with patch.object(rust_backend, "_native", native):
+            self.assertEqual(rust_backend.md5_file_checksum(Path("artifact.zip")), "md5")
+        native.md5_file_checksum.assert_called_once_with("artifact.zip")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_md5_file_checksum_returns_none_when_native_api_is_unavailable(self):
+        with patch.object(rust_backend, "_native", object()):
+            self.assertIsNone(rust_backend.md5_file_checksum("artifact.zip"))
 
     @patch.dict("os.environ", {}, clear=True)
     def test_write_sync_state_compact_uses_native_module(self):

@@ -379,18 +379,17 @@ class ApplicationBuilder:
                 rust_graph_groups,
             )
 
-        self._compare_rust_function_dedupe(
-            build_graph, functions, function_env_vars, compact_graph_inputs, shadow_graph_groups
-        )
-
-        layer_dedupe_specs = (
-            self._layer_dedupe_specs(layers, layer_env_vars)
-            if is_rust_build_core_enabled() or is_rust_build_core_shadow_enabled()
-            else None
-        )
-        self._compare_rust_layer_dedupe(
-            build_graph, layers, layer_dedupe_specs, compact_graph_inputs, shadow_graph_groups
-        )
+        if is_rust_build_core_shadow_enabled():
+            self._compare_rust_function_dedupe(
+                build_graph, functions, function_env_vars, compact_graph_inputs, shadow_graph_groups
+            )
+            self._compare_rust_layer_dedupe(
+                build_graph,
+                layers,
+                self._layer_dedupe_specs(layers, layer_env_vars),
+                compact_graph_inputs,
+                shadow_graph_groups,
+            )
 
         build_graph.clean_redundant_definitions_and_update(not self._is_building_specific_resource)
         return build_graph
@@ -550,6 +549,9 @@ class ApplicationBuilder:
         compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
         shadow_graph_groups: Optional[tuple[List[List[int]], List[List[int]]]] = None,
     ) -> None:
+        if not is_rust_build_core_shadow_enabled():
+            return
+
         rust_graph_groups = (
             shadow_graph_groups
             if shadow_graph_groups is not None
@@ -651,6 +653,9 @@ class ApplicationBuilder:
         compact_graph_inputs: Optional[tuple[List[tuple], List[tuple]]] = None,
         shadow_graph_groups: Optional[tuple[List[List[int]], List[List[int]]]] = None,
     ) -> None:
+        if not is_rust_build_core_shadow_enabled():
+            return
+
         if layer_dedupe_specs is None and compact_graph_inputs is None and shadow_graph_groups is None:
             return
 
@@ -834,19 +839,21 @@ class ApplicationBuilder:
 
         try:
             if not self._image_build_client:
-                if self._use_buildkit:
-                    container_client = self._container_client
-                    engine_type = container_client.get_runtime_type()
+                container_client = self._container_client
+                engine_type = container_client.get_runtime_type()
+                is_available, error_msg = CLIBuildClient.is_available(engine_type)
 
-                    is_available, error_msg = CLIBuildClient.is_available(engine_type)
-                    if not is_available:
-                        raise BuildkitNotAvailableException(error_msg)
-
+                if is_available:
                     self._image_build_client = CLIBuildClient(engine_type=engine_type)
-                    LOG.debug(f"Using CLIBuildClient with engine_type {engine_type}")
+                    LOG.debug("Using CLIBuildClient with engine_type %s", engine_type)
+                elif self._use_buildkit:
+                    raise BuildkitNotAvailableException(error_msg)
                 else:
-                    self._image_build_client = SDKBuildClient(self._container_client)
-                    LOG.debug("Using SDKBuildClient")
+                    LOG.debug(
+                        "CLI image build client is unavailable (%s); falling back to SDKBuildClient",
+                        error_msg,
+                    )
+                    self._image_build_client = SDKBuildClient(container_client)
             build_logs = self._image_build_client.build_image(**build_args)  # type: ignore[arg-type]
             LOG.debug(f"Image built for {function_name} function")
         except docker.errors.BuildError as ex:

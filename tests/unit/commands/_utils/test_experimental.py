@@ -13,6 +13,7 @@ from samcli.commands._utils.experimental import (
     set_experimental,
     get_enabled_experimental_flags,
     get_all_experimental_env_vars,
+    ExperimentalFlag,
 )
 from samcli.lib.utils.colors import Colored
 
@@ -50,6 +51,21 @@ class TestExperimental(TestCase):
         self.gc_mock.return_value.get_value.side_effect = [False, False]
         result = is_experimental_enabled(config_entry)
         self.assertFalse(result)
+
+    def test_build_performance_is_enabled_by_default(self):
+        self.gc_mock.return_value.get_value.side_effect = lambda config_entry, default, **_: default
+
+        self.assertTrue(is_experimental_enabled(ExperimentalFlag.BuildPerformance))
+
+    def test_package_performance_is_enabled_by_default(self):
+        self.gc_mock.return_value.get_value.side_effect = lambda config_entry, default, **_: default
+
+        self.assertTrue(is_experimental_enabled(ExperimentalFlag.PackagePerformance))
+
+    def test_performance_defaults_can_be_disabled(self):
+        self.gc_mock.return_value.get_value.side_effect = [False, False]
+
+        self.assertFalse(is_experimental_enabled(ExperimentalFlag.BuildPerformance))
 
     def test_set_experimental(self):
         config_entry = MagicMock()

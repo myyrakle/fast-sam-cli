@@ -82,6 +82,7 @@ class TestCLIBuildClient(TestCase):
     """Test CLIBuildClient implementation"""
 
     def setUp(self):
+        CLIBuildClient._availability_cache.clear()
         self.docker_client = CLIBuildClient(engine_type="docker")
         self.finch_client = CLIBuildClient(engine_type="finch")
 
@@ -132,6 +133,7 @@ class TestCLIBuildClient(TestCase):
             "--provenance=false",
             "--sbom=false",
             "--load",
+            "--progress=plain",
             "--platform",
             "linux/amd64",
             "--build-arg",
@@ -247,6 +249,25 @@ class TestCLIBuildClient(TestCase):
         result = CLIBuildClient.is_available("docker")
 
         self.assertEqual(result, (True, None))
+        mock_which.assert_called_once_with("docker")
+        mock_run.assert_called_once_with(
+            ["docker", "buildx", "version"],
+            capture_output=True,
+            check=False,
+        )
+
+    @patch("samcli.local.docker.image_build_client.shutil.which")
+    @patch("samcli.local.docker.image_build_client.subprocess.run")
+    def test_is_available_docker_result_is_cached(self, mock_run, mock_which):
+        """Test is_available avoids repeated docker CLI probes for the same engine"""
+        mock_which.return_value = "/usr/bin/docker"
+        mock_run.return_value = Mock(returncode=0)
+
+        first_result = CLIBuildClient.is_available("docker")
+        second_result = CLIBuildClient.is_available("docker")
+
+        self.assertEqual(first_result, (True, None))
+        self.assertEqual(second_result, (True, None))
         mock_which.assert_called_once_with("docker")
         mock_run.assert_called_once_with(
             ["docker", "buildx", "version"],

@@ -140,11 +140,6 @@ class FunctionSyncFlow(SyncFlow, ABC):
         since a manually created function version resource behaves statically in a stack.
         Redeploying a version resource through CFN will not create a new version.
         """
-        LOG.debug("%sWaiting on Remote Function Update", self.log_prefix)
-        self._lambda_waiter.wait(
-            FunctionName=self.get_physical_id(self._function_identifier), WaiterConfig=self._lambda_waiter_config
-        )
-        LOG.debug("%sRemote Function Updated", self.log_prefix)
         sync_flows: List[SyncFlow] = list()
 
         function_resource = self._get_resource(self._function_identifier)
@@ -153,6 +148,10 @@ class FunctionSyncFlow(SyncFlow, ABC):
 
         auto_publish_alias_name = function_resource.get("Properties", dict()).get("AutoPublishAlias", None)
         if auto_publish_alias_name:
+            function_physical_id = self.get_physical_id(self._function_identifier)
+            LOG.debug("%sWaiting on Remote Function Update", self.log_prefix)
+            self._lambda_waiter.wait(FunctionName=function_physical_id, WaiterConfig=self._lambda_waiter_config)
+            LOG.debug("%sRemote Function Updated", self.log_prefix)
             sync_flows.append(
                 AliasVersionSyncFlow(
                     self._function_identifier,
@@ -182,12 +181,17 @@ class FunctionSyncFlow(SyncFlow, ABC):
             if self.has_locks():
                 exit_stack.enter_context(self._get_lock_chain())
 
-            self._lambda_client.update_function_code(**update_params.to_dict())
+            response = self._lambda_client.update_function_code(**update_params.to_dict())
 
             # We need to wait for the cloud side update to finish
             # Otherwise even if the call is finished and lockchain is released
             # It is still possible that we have a race condition on cloud updating the same function
-            wait_for_function_update_complete(self._lambda_client, update_params.FunctionName)
+            if isinstance(response, dict):
+                wait_for_function_update_complete(
+                    self._lambda_client, update_params.FunctionName, initial_response=response
+                )
+            else:
+                wait_for_function_update_complete(self._lambda_client, update_params.FunctionName)
 
     def publish_function_version_with_lock(self, publish_params: FunctionPublishVersionParams) -> None:
         """
@@ -223,7 +227,12 @@ class FunctionSyncFlow(SyncFlow, ABC):
 
             # Wait for the publish version to complete to prevent a new publishVersion call
             # before previous one completes.
-            wait_for_function_update_complete(self._lambda_client, publish_params.FunctionName, new_version)
+            if isinstance(response, dict):
+                wait_for_function_update_complete(
+                    self._lambda_client, publish_params.FunctionName, new_version, initial_response=response
+                )
+            else:
+                wait_for_function_update_complete(self._lambda_client, publish_params.FunctionName, new_version)
 
 
 class FunctionUpdateStatus(Enum):
@@ -234,8 +243,20 @@ class FunctionUpdateStatus(Enum):
     IN_PROGRESS = "InProgress"
 
 
+def _function_update_status(response: Optional[Dict[str, Any]]) -> str:
+    if not response:
+        return FunctionUpdateStatus.IN_PROGRESS.value
+    configuration = response.get("Configuration")
+    if isinstance(configuration, dict):
+        return configuration.get("LastUpdateStatus") or FunctionUpdateStatus.IN_PROGRESS.value
+    return response.get("LastUpdateStatus") or FunctionUpdateStatus.IN_PROGRESS.value
+
+
 def wait_for_function_update_complete(
-    lambda_client: BaseClient, physical_id: str, qualifier: Optional[str] = None
+    lambda_client: BaseClient,
+    physical_id: str,
+    qualifier: Optional[str] = None,
+    initial_response: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Checks on cloud side to wait for the function update status to be complete
@@ -252,10 +273,11 @@ def wait_for_function_update_complete(
     get_function_params = (
         {"FunctionName": physical_id} if not qualifier else {"FunctionName": physical_id, "Qualifier": qualifier}
     )
-    status = FunctionUpdateStatus.IN_PROGRESS.value
+    status = _function_update_status(initial_response)
     while status == FunctionUpdateStatus.IN_PROGRESS.value:
+        initial_response = None
         response = lambda_client.get_function(**get_function_params)  # type: ignore
-        status = response.get("Configuration", {}).get("LastUpdateStatus", "")
+        status = _function_update_status(response)
 
         if status == FunctionUpdateStatus.IN_PROGRESS.value:
             time.sleep(FUNCTION_SLEEP)

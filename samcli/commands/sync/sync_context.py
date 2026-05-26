@@ -220,6 +220,7 @@ class SyncContext:
         self._current_state = SyncState(dependency_layer, dict(), None)
         self._previous_state = None
         self._runtime_state = None
+        self._dirty = False
         self.skip_deploy_sync = skip_deploy_sync
         self._build_dir = Path(build_dir)
         self._cache_dir = Path(cache_dir)
@@ -235,6 +236,7 @@ class SyncContext:
         # if adl parameter is changed between sam sync runs, cleanup build, cache and dependencies folders
         if self._previous_state and self._previous_state.dependency_layer != self._current_state.dependency_layer:
             self._cleanup_build_folders()
+            self._dirty = True
 
         return self
 
@@ -252,6 +254,7 @@ class SyncContext:
             self._current_state.latest_infra_sync_time = sync_time
             if self._runtime_state is not None:
                 self._runtime_state.update_infra_sync_time(sync_time.timestamp())
+            self._dirty = True
             self._write()
 
     def get_latest_infra_sync_time(self) -> Optional[datetime]:
@@ -293,7 +296,7 @@ class SyncContext:
             self._current_state.resource_sync_states[resource_id] = ResourceSyncState(hash_value, sync_time)
             if self._runtime_state is not None:
                 self._runtime_state.update_resource_sync_state(resource_id, hash_value, sync_time.timestamp())
-            self._write()
+            self._dirty = True
 
     def get_resource_latest_sync_hash(self, resource_id: str) -> Optional[str]:
         """
@@ -326,9 +329,12 @@ class SyncContext:
             return resource_sync_state.hash_value
 
     def _write(self) -> None:
+        if not self._dirty:
+            return
         if self._runtime_state is not None:
             try:
                 self._runtime_state.write(str(self._file_path))
+                self._dirty = False
                 return
             except (OSError, TypeError):
                 pass
@@ -343,9 +349,11 @@ class SyncContext:
                 for resource_id, state in self._current_state.resource_sync_states.items()
             ],
         ):
+            self._dirty = False
             return
         with open(self._file_path, "w+") as file:
             file.write(tomlkit.dumps(_sync_state_to_toml_document(self._current_state)))
+        self._dirty = False
 
     def _read(self) -> None:
         self._runtime_state = rust_read_runtime_sync_state(str(self._file_path))
@@ -379,6 +387,7 @@ class SyncContext:
                 )
         except OSError:
             LOG.debug("Missing previous sync state, will create a new file at the end of this execution")
+            self._dirty = True
 
     @staticmethod
     def _sync_state_from_rows(
